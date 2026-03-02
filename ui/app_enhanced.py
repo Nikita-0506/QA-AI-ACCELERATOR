@@ -1,4 +1,3 @@
-
 """Enhanced Streamlit UI with detailed analysis display."""
 import streamlit as st
 import os
@@ -8,6 +7,7 @@ import json
 from io import StringIO
 from datetime import datetime
 import base64
+import requests
 
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
@@ -287,6 +287,30 @@ def extract_commits_by_range(repo_url, start_index, end_index, github_token=None
         st.error(f"Failed to extract commits: {e}")
         return []
 
+# Jenkins integration settings (update if needed)
+JENKINS_URL = os.getenv('JENKINS_URL', 'http://localhost:8080')
+JENKINS_JOB = os.getenv('JENKINS_JOB', 'qa_ai_accelerator')
+JENKINS_USER = os.getenv('JENKINS_USERNAME', 'admin')
+JENKINS_TOKEN = os.getenv('JENKINS_API_TOKEN', '')
+
+def fetch_jenkins_build_info():
+    """Fetch latest Jenkins build info and test report artifact."""
+    try:
+        api_url = f"{JENKINS_URL}/job/{JENKINS_JOB}/lastSuccessfulBuild/api/json"
+        auth = (JENKINS_USER, JENKINS_TOKEN) if JENKINS_TOKEN else None
+        resp = requests.get(api_url, auth=auth, timeout=10)
+        resp.raise_for_status()
+        build_info = resp.json()
+        # Find results.xml artifact
+        artifact_url = None
+        for artifact in build_info.get('artifacts', []):
+            if artifact['fileName'] == 'results.xml':
+                artifact_url = f"{JENKINS_URL}/job/{JENKINS_JOB}/lastSuccessfulBuild/artifact/{artifact['relativePath']}"
+                break
+        return build_info, artifact_url
+    except Exception as e:
+        return None, None
+
 # Sidebar
 with st.sidebar:
     # ═══════════════════════════════════════════════════════
@@ -426,6 +450,20 @@ with st.sidebar:
         # In "Commit Range" mode, reports come from dataset
         baseline_json = None
         current_json = None
+
+# --- Jenkins Results Section ---
+st.sidebar.markdown('---')
+st.sidebar.header('Jenkins Test Results')
+build_info, artifact_url = fetch_jenkins_build_info()
+if build_info:
+    st.sidebar.success(f"Last build: #{build_info['number']} - {build_info['result']}")
+    st.sidebar.write(f"Built at: {datetime.fromtimestamp(build_info['timestamp']/1000).strftime('%Y-%m-%d %H:%M:%S')}")
+    if artifact_url:
+        st.sidebar.markdown(f"[Download results.xml]({artifact_url})")
+    else:
+        st.sidebar.info('No results.xml artifact found.')
+else:
+    st.sidebar.warning('Could not fetch Jenkins build info.')
 
 # Main content area
 st.title("🧪 Testing Engine")
