@@ -318,10 +318,9 @@ with st.sidebar:
     # ═══════════════════════════════════════════════════════
     st.header("📂 Repository Configuration")
     
-    repo_url = st.text_input(
-        "Git Repository URL",
-        value="https://github.com/Inadev-Data-Lab/QA_Playwright_Repo",
-        help="GitHub repository URL"
+    repo_url = st.text_input("Git Repository URL",
+        value="https://github.com/Nikita-0506/QA-AI-ACCELERATOR.git",
+        help="URL of the GitHub repository to analyze."
     )
     
     github_token = st.text_input(
