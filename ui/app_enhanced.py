@@ -15,6 +15,7 @@ from agent.git_repo import GitRepoAnalyzer
 from agent.parsers import CucumberJsonParser
 from agent.report_builder_enhanced import EnhancedReportBuilder
 from agent.analyzers.compare_runs import RunComparator
+from agent.analyzers.llm_analyzer import LLMAnalyzer
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -286,6 +287,131 @@ def extract_commits_by_range(repo_url, start_index, end_index, github_token=None
         st.error(f"Failed to extract commits: {e}")
         return []
 
+
+# ── Pairwise commit inference helpers ──────────────────────────
+
+def get_pairwise_diffs(repo_url, commits_list, github_token=None):
+    """
+    Given an ordered list of commits (newest-first from GitPython),
+    return a list of dicts describing what changed between each
+    consecutive pair (older → newer).
+    """
+    if len(commits_list) < 2:
+        return []
+
+    # commits_list is newest-first; reverse so pairs go old→new
+    ordered = list(reversed(commits_list))
+    pairs = []
+
+    try:
+        with GitRepoAnalyzer(repo_url, github_token) as git_analyzer:
+            for i in range(len(ordered) - 1):
+                older = ordered[i]
+                newer = ordered[i + 1]
+
+                older_sha = older['sha']
+                newer_sha = newer['sha']
+
+                # Get diff between the two commits
+                changed_files = []
+                diff_texts = []
+                try:
+                    older_commit = git_analyzer.repo.commit(older_sha)
+                    newer_commit = git_analyzer.repo.commit(newer_sha)
+
+                    for diff_item in older_commit.diff(newer_commit, create_patch=True):
+                        file_path = diff_item.b_path or diff_item.a_path
+                        diff_text = ""
+                        if diff_item.diff:
+                            try:
+                                diff_text = diff_item.diff.decode('utf-8', errors='ignore')
+                                if len(diff_text) > 5000:
+                                    diff_text = diff_text[:5000] + "\n... [truncated]"
+                            except Exception:
+                                diff_text = ""
+
+                        changed_files.append(file_path)
+                        diff_texts.append({"file": file_path, "diff": diff_text})
+                except Exception as e:
+                    changed_files = []
+                    diff_texts = []
+
+                pairs.append({
+                    "older": older,
+                    "newer": newer,
+                    "changed_files": changed_files,
+                    "diffs": diff_texts,
+                })
+
+    except Exception as e:
+        st.error(f"Failed to get pairwise diffs: {e}")
+        return []
+
+    return pairs
+
+
+def generate_commit_pair_inference(llm, pair):
+    """Use the LLM to summarise what changed between two commits."""
+    older = pair["older"]
+    newer = pair["newer"]
+    diffs = pair["diffs"]
+
+    # Build a concise prompt
+    diff_summary_parts = []
+    for d in diffs[:10]:  # cap at 10 files
+        snippet = d["diff"][:1500] if d["diff"] else "(binary or empty)"
+        diff_summary_parts.append(f"### {d['file']}\n```\n{snippet}\n```")
+
+    diff_block = "\n\n".join(diff_summary_parts) if diff_summary_parts else "No file diffs available."
+
+    prompt = f"""You are a senior software engineer reviewing commits.
+
+**Older Commit:** {older['sha'][:8]} — {older['message']}
+**Newer Commit:** {newer['sha'][:8]} — {newer['message']}
+**Author:** {newer['author']['name']}
+**Files Changed:** {', '.join(pair['changed_files'][:15]) or 'none detected'}
+
+### Diffs
+{diff_block}
+
+Provide a concise inference (3-6 bullet points) covering:
+1. **What changed** — summarise the code changes in plain English.
+2. **Why it likely changed** — infer the intent (bug fix, feature, refactor, config, etc.).
+3. **Potential impact** — what parts of the system could be affected.
+4. **Risk level** — Low / Medium / High and a one-line justification.
+
+Be specific: reference file names and line-level details where possible."""
+
+    if not llm or not llm.client:
+        # Fallback: rule-based summary when no LLM is available
+        files_str = ", ".join(pair["changed_files"][:5]) or "unknown"
+        return (
+            f"- **Files changed:** {files_str}\n"
+            f"- **Commit message:** {newer['message']}\n"
+            f"- *LLM not configured — showing basic summary only.*"
+        )
+
+    try:
+        response = llm.client.chat.completions.create(
+            model=llm.model,
+            messages=[
+                {
+                    "role": "system",
+                    "content": (
+                        "You are an expert code reviewer. Provide concise, "
+                        "actionable commit-pair analysis in Markdown bullet points."
+                    ),
+                },
+                {"role": "user", "content": prompt},
+            ],
+            temperature=0.2,
+            max_tokens=800,
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        return f"⚠️ LLM inference failed: {e}"
+
+
 # Sidebar
 with st.sidebar:
     # ═══════════════════════════════════════════════════════
@@ -491,9 +617,10 @@ if 'report' in st.session_state and st.session_state.metrics:
     st.markdown("<br>", unsafe_allow_html=True)
 
 # Tabs
-tab1, tab2, tab3, tab4 = st.tabs([
+tab1, tab2, tab3, tab4, tab5 = st.tabs([
     "🤖 AI Analysis",
     "📦 Commits",
+    "🔍 Commit Inference",
     "📊 Test Reports",
     "📜 History"
 ])
@@ -823,7 +950,110 @@ with tab2:
         st.info("Run analysis first to see commit history")
 
 with tab3:
-    st.header("📊 Test Reports")
+    st.header("� Commit-by-Commit Inference")
+    st.markdown(
+        "Select a commit range and get an AI-powered summary of "
+        "**what changed between each consecutive pair** of commits."
+    )
+
+    # ── Controls ──────────────────────────────────────────
+    inf_col1, inf_col2 = st.columns([3, 1])
+
+    with inf_col1:
+        if use_index_range:
+            inf_range = st.slider(
+                "Commit range for inference",
+                min_value=1,
+                max_value=total_commits,
+                value=(start_commit, end_commit),
+                key="inf_range_slider",
+                help="Pick the range of commits (1 = newest)",
+            )
+            inf_start, inf_end = inf_range
+        else:
+            inf_start_ref = st.text_input("Older commit ref", value=baseline_ref or "", key="inf_older")
+            inf_end_ref = st.text_input("Newer commit ref", value=current_ref or "", key="inf_newer")
+            inf_start, inf_end = None, None  # handled via refs
+
+    with inf_col2:
+        run_inference = st.button(
+            "⚡ Run Inference", type="primary", use_container_width=True, key="run_inf"
+        )
+
+    # ── Execution ─────────────────────────────────────────
+    if run_inference:
+        with st.spinner("Cloning repo & computing pairwise diffs…"):
+            # Fetch commits
+            if use_index_range:
+                inf_commits = extract_commits_by_range(
+                    repo_url, inf_start, inf_end, github_token or None
+                )
+            else:
+                inf_commits = extract_commits_between_refs(
+                    repo_url, inf_start_ref, inf_end_ref, github_token or None
+                )
+
+            if len(inf_commits) < 2:
+                st.warning("Need at least 2 commits to produce pairwise inference.")
+            else:
+                st.success(f"Fetched **{len(inf_commits)}** commits — generating **{len(inf_commits)-1}** pairwise inferences.")
+
+                pairs = get_pairwise_diffs(repo_url, inf_commits, github_token or None)
+
+                if not pairs:
+                    st.error("Could not compute diffs between commits.")
+                else:
+                    # Initialise LLM (reuses existing Azure / OpenAI config)
+                    llm = LLMAnalyzer(api_key=openai_key_override or None)
+
+                    progress = st.progress(0)
+                    results = []
+
+                    for idx, pair in enumerate(pairs):
+                        inference_text = generate_commit_pair_inference(llm, pair)
+                        results.append((pair, inference_text))
+                        progress.progress((idx + 1) / len(pairs))
+
+                    # Store in session for persistence across reruns
+                    st.session_state["inference_results"] = results
+
+    # ── Display results ───────────────────────────────────
+    if "inference_results" in st.session_state and st.session_state["inference_results"]:
+        results = st.session_state["inference_results"]
+        st.divider()
+        st.subheader(f"📋 Pairwise Inference  ({len(results)} pairs)")
+
+        for idx, (pair, inference_text) in enumerate(results):
+            older = pair["older"]
+            newer = pair["newer"]
+            label = (
+                f"**{older['sha'][:8]}** → **{newer['sha'][:8]}**  ·  "
+                f"{newer['message'][:70]}"
+            )
+
+            with st.expander(label, expanded=(idx == 0)):
+                meta_col1, meta_col2, meta_col3 = st.columns([2, 2, 1])
+                with meta_col1:
+                    st.caption(f"**Author:** {newer['author']['name']}")
+                with meta_col2:
+                    st.caption(f"**Date:** {newer['date'][:10]}")
+                with meta_col3:
+                    st.caption(f"**Files:** {len(pair['changed_files'])}")
+
+                # Show changed file list
+                if pair["changed_files"]:
+                    with st.popover("📂 Changed files"):
+                        for f in pair["changed_files"]:
+                            st.markdown(f"- `{f}`")
+
+                st.markdown("---")
+                st.markdown(inference_text)
+    else:
+        if not run_inference if 'run_inference' in dir() else True:
+            st.info("Select a commit range above and click **⚡ Run Inference** to begin.")
+
+with tab4:
+    st.header("�📊 Test Reports")
     
     if ready_status and baseline_content and current_content:
         st.markdown("### 📄 Test Reports Preview")
@@ -886,7 +1116,7 @@ with tab3:
         else:
             st.warning("No reports found in dataset. Place JSON reports in html-reports/ folder")
 
-with tab4:
+with tab5:
     st.header("📜 History")
     
     if 'report' in st.session_state:
