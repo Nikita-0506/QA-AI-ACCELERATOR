@@ -58,6 +58,22 @@ st.markdown("""
         background-color: #1a472a;
         color: #4ade80;
     }
+    .timeout-badge {
+        background-color: #854d0e;
+        color: #fbbf24;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 11px;
+        font-weight: bold;
+        margin-left: 8px;
+    }
+    .timeout-alert {
+        background-color: #451a03;
+        border-left: 4px solid #f59e0b;
+        padding: 12px;
+        margin: 10px 0;
+        border-radius: 4px;
+    }
     .summary-box {
         background-color: #1a1a2e;
         border-left: 4px solid #3b82f6;
@@ -79,6 +95,31 @@ st.markdown("""
     }
 </style>
 """, unsafe_allow_html=True)
+
+# Helper function to detect timeout issues
+def detect_timeout_issue(error_message, explanation=""):
+    """Detect if the failure is related to timeout/session timeout."""
+    if not error_message and not explanation:
+        return False
+    
+    combined_text = f"{error_message} {explanation}".lower()
+    
+    timeout_keywords = [
+        'timeout',
+        'timed out',
+        'session timeout',
+        'session expired',
+        'connection timeout',
+        'read timeout',
+        'element not found within',
+        'waiting for element',
+        'expected condition failed',
+        'not completing within',
+        'exceeded timeout',
+        'wait timeout'
+    ]
+    
+    return any(keyword in combined_text for keyword in timeout_keywords)
 
 # Initialize session state
 if 'analysis_timestamp' not in st.session_state:
@@ -829,80 +870,440 @@ with tab1:
         st.subheader("📊 Executive Summary")
         st.info(report["executive_summary"])
         
-        # Key Findings
-        if report.get("key_findings"):
-            st.subheader("🔍 Key Findings")
-            for i, finding in enumerate(report["key_findings"]):
-                st.warning(finding)
-        
-        # Detailed Failures
+        # NEW: Change Flow Summary
         st.divider()
-        st.subheader("💥 Test Failures Analysis")
+        st.subheader("🔄 Change Flow Summary")
+        
+        commits = st.session_state.get('commits', [])
+        if commits:
+            # Group changes by type
+            feature_changes = []
+            step_changes = []
+            locator_changes = []
+            other_changes = []
+            
+            for commit in commits:
+                for file in commit.get('changed_files', []):
+                    file_path = file.get('file', '')
+                    # Extract commit message first line
+                    commit_msg_first_line = commit['message'].split('\n')[0] if '\n' in commit['message'] else commit['message']
+                    
+                    if '.feature' in file_path:
+                        feature_changes.append({
+                            'file': file_path,
+                            'commit': commit['sha'][:8],
+                            'message': commit_msg_first_line,
+                            'author': commit['author']['name'],
+                            'insertions': file.get('insertions', 0),
+                            'deletions': file.get('deletions', 0)
+                        })
+                    elif 'step' in file_path.lower() or 'Steps.java' in file_path:
+                        step_changes.append({
+                            'file': file_path,
+                            'commit': commit['sha'][:8],
+                            'message': commit_msg_first_line,
+                            'author': commit['author']['name'],
+                            'insertions': file.get('insertions', 0),
+                            'deletions': file.get('deletions', 0)
+                        })
+                    elif 'locator' in file_path.lower() or '.properties' in file_path:
+                        locator_changes.append({
+                            'file': file_path,
+                            'commit': commit['sha'][:8],
+                            'message': commit_msg_first_line,
+                            'author': commit['author']['name'],
+                            'insertions': file.get('insertions', 0),
+                            'deletions': file.get('deletions', 0)
+                        })
+                    else:
+                        other_changes.append({
+                            'file': file_path,
+                            'commit': commit['sha'][:8],
+                            'message': commit_msg_first_line,
+                            'author': commit['author']['name'],
+                            'insertions': file.get('insertions', 0),
+                            'deletions': file.get('deletions', 0)
+                        })
+            
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric("🎬 Feature Files", len(feature_changes))
+            with col2:
+                st.metric("🔧 Step Definitions", len(step_changes))
+            with col3:
+                st.metric("📍 Locators", len(locator_changes))
+            with col4:
+                st.metric("📄 Other Files", len(other_changes))
+            
+            st.markdown("---")
+            
+            # Show important changes
+            if feature_changes:
+                with st.expander(f"🎬 Feature File Changes ({len(feature_changes)})", expanded=True):
+                    for change in feature_changes[:10]:
+                        st.markdown(f"""
+                        **{change['file']}**  
+                        📝 _{change['message']}_  
+                        👤 {change['author']} | 🔑 `{change['commit']}` | +{change['insertions']} -{change['deletions']} lines
+                        """)
+                        st.markdown("---")
+            
+            if step_changes:
+                with st.expander(f"🔧 Step Definition Changes ({len(step_changes)})", expanded=True):
+                    for change in step_changes[:10]:
+                        st.markdown(f"""
+                        **{change['file']}**  
+                        📝 _{change['message']}_  
+                        👤 {change['author']} | 🔑 `{change['commit']}` | +{change['insertions']} -{change['deletions']} lines
+                        """)
+                        st.markdown("---")
+            
+            if locator_changes:
+                with st.expander(f"📍 Locator Changes ({len(locator_changes)})", expanded=True):
+                    for change in locator_changes[:10]:
+                        st.markdown(f"""
+                        **{change['file']}**  
+                        📝 _{change['message']}_  
+                        👤 {change['author']} | 🔑 `{change['commit']}` | +{change['insertions']} -{change['deletions']} lines
+                        """)
+                        st.markdown("---")
+        
+        # Test Impact Analysis - Regressions
+        st.divider()
+        st.subheader("❌ Tests That Failed (Previously Passed)")
         
         detailed_regressions = [r for r in report["regressions"] 
                                 if "Not analyzed in detail" not in str(r.get("analysis", {}).get("root_cause", ""))]
+        
+        if detailed_regressions:
+            # Count timeout-related failures
+            timeout_failures = []
+            non_timeout_failures = []
+            
+            for regression in detailed_regressions:
+                error_msg = regression.get("error_message", "")
+                explanation = regression.get("analysis", {}).get("detailed_explanation", "")
+                
+                if detect_timeout_issue(error_msg, explanation):
+                    timeout_failures.append(regression)
+                else:
+                    non_timeout_failures.append(regression)
+            
+            # Display summary with timeout count
+            if timeout_failures:
+                st.warning(f"**{len(detailed_regressions)} test(s) regressed** - Previously passing tests now failing ({len(timeout_failures)} timeout-related)")
+            else:
+                st.warning(f"**{len(detailed_regressions)} test(s) regressed** - Previously passing tests now failing")
+            
+            # Display timeout failures first with special highlighting
+            if timeout_failures:
+                st.markdown("### ⏱️ Timeout-Related Failures (High Priority)")
+                
+                for i, regression in enumerate(timeout_failures):
+                    analysis = regression.get("analysis", {})
+                    
+                    st.markdown(f"""
+                    <div style="background-color: #451a03; border-left: 4px solid #f59e0b; padding: 15px; margin: 10px 0; border-radius: 4px;">
+                        <h4 style="color: #f59e0b; margin: 0;">⏱️ {regression['scenario_name']} <span class="timeout-badge">⚠️ TIMEOUT</span></h4>
+                        <p style="color: #999; font-size: 14px; margin: 5px 0;">Feature: {regression['feature']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    with st.expander("📖 View Detailed Root Cause Analysis", expanded=False):
+                        # Timeout-specific alert
+                        st.markdown("""
+                        <div class="timeout-alert">
+                            <h4 style="color: #f59e0b; margin-top: 0;">⏱️ Session Timeout Detected</h4>
+                            <p style="color: #fbbf24; margin-bottom: 0;">
+                                This test failed due to a <strong>timeout/session timeout issue</strong>. 
+                                The application did not respond within the expected time window, which may indicate:
+                            </p>
+                            <ul style="color: #fcd34d;">
+                                <li>Session expired before test completion</li>
+                                <li>Authentication service delay or unavailability</li>
+                                <li>Page loading performance degradation</li>
+                                <li>Network latency or connection issues</li>
+                                <li>Element not becoming available within timeout period</li>
+                            </ul>
+                        </div>
+                        """, unsafe_allow_html=True)
+                        
+                        st.markdown("---")
+                        
+                        # Root Cause Section
+                        st.markdown("### 🎯 Root Cause Analysis")
+                        
+                        if analysis.get("analysis_type") == "llm_powered":
+                            provider = analysis.get("provider", "AI")
+                            st.success(f"🤖 Powered by {provider}")
+                        
+                        explanation = analysis.get("detailed_explanation", "No analysis available")
+                        
+                        # Parse and format the explanation into sections
+                        st.markdown(explanation)
+                        
+                        # Show exact line changes if available
+                        st.markdown("---")
+                        st.markdown("### 📝 Exact Changes That Caused This Failure")
+                        
+                        # Try to extract specific changes from detailed_file_changes
+                        relevant_changes = []
+                        for file_change in report.get("detailed_file_changes", []):
+                            if any(keyword in file_change['file_path'].lower() 
+                                   for keyword in ['feature', 'step', 'page', 'locator', 'timeout', 'wait']):
+                                relevant_changes.append(file_change)
+                        
+                        if relevant_changes:
+                            for file_change in relevant_changes[:3]:
+                                st.markdown(f"**📄 {file_change['file_path']}**")
+                                st.caption(file_change['summary'])
+                                
+                                for line_change in file_change["line_changes"][:5]:
+                                    if line_change['change_type'] == 'modified':
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            st.markdown(f"**❌ Line {line_change['line_number']} (Before)**")
+                                            st.code(line_change.get('old_content', ''), language="text")
+                                        with col2:
+                                            st.markdown(f"**✅ Line {line_change['line_number']} (After)**")
+                                            st.code(line_change.get('new_content', ''), language="text")
+                                        
+                                        st.markdown("**💡 Impact:** This change directly affected test behavior and timing")
+                                        st.markdown("---")
+                                    
+                                    elif line_change['change_type'] == 'added':
+                                        st.markdown(f"**➕ Line {line_change['line_number']} (Added)**")
+                                        st.code(line_change.get('new_content', ''), language="text")
+                                        st.markdown("**💡 Impact:** New code introduced")
+                                        st.markdown("---")
+                                    
+                                    elif line_change['change_type'] == 'removed':
+                                        st.markdown(f"**➖ Line {line_change['line_number']} (Removed)**")
+                                        st.code(line_change.get('old_content', ''), language="text")
+                                        st.markdown("**💡 Impact:** Code removed")
+                                        st.markdown("---")
+                        else:
+                            st.info("No specific line changes identified. Check commit details in the Commits tab.")
+                        
+                        # Error details
+                        st.markdown("---")
+                        st.markdown("### 🐛 Error Details")
+                        
+                        col1, col2 = st.columns([2, 1])
+                        with col1:
+                            error_msg = regression.get("error_message", "No error message")
+                            st.code(error_msg, language="text")
+                        
+                        with col2:
+                            st.metric(
+                                "Duration Change",
+                                f"{regression['current_duration_ms']:.0f}ms",
+                                f"+{regression['current_duration_ms'] - regression['baseline_duration_ms']:.0f}ms"
+                            )
+                        
+                        # Timeout-specific recommendations
+                        st.markdown("---")
+                        st.markdown("### 💡 Recommended Actions for Timeout Issues")
+                        st.markdown("""
+                        - **Increase timeout values** if the application legitimately needs more time
+                        - **Check session management** - verify session timeout configuration matches test duration
+                        - **Investigate authentication service** - ensure auth endpoints are responsive
+                        - **Review page load performance** - check for recent changes affecting load times
+                        - **Verify environment stability** - confirm network connectivity and service availability
+                        - **Check wait conditions** - ensure explicit waits are properly configured
+                        - **Review test data** - confirm test credentials and data are valid
+                        """)
+                        
+                        # Key Points Summary
+                        st.markdown("---")
+                        st.markdown("### 📌 Key Points")
+                        
+                        lines = explanation.split('\n')
+                        key_points = []
+                        for line in lines:
+                            line = line.strip()
+                            if line.startswith('- ') or line.startswith('* ') or line.startswith('1.') or line.startswith('2.') or line.startswith('3.'):
+                                key_points.append(line)
+                        
+                        if key_points:
+                            for point in key_points[:5]:
+                                st.markdown(point)
+                        else:
+                            st.markdown("- Test failed due to timeout/session timeout")
+                            st.markdown("- Application did not respond within expected time")
+                            st.markdown("- Review recent code changes affecting timing")
+                            st.markdown("- Check session configuration and authentication flow")
+            
+            # Display non-timeout failures
+            if non_timeout_failures:
+                if timeout_failures:
+                    st.markdown("---")
+                    st.markdown("### 🔴 Other Failures")
+                
+                for i, regression in enumerate(non_timeout_failures):
+                    analysis = regression.get("analysis", {})
+                    
+                    st.markdown(f"""
+                    <div style="background-color: #2d1e1e; border-left: 4px solid #ef4444; padding: 15px; margin: 10px 0; border-radius: 4px;">
+                        <h4 style="color: #ef4444; margin: 0;">🔴 {regression['scenario_name']}</h4>
+                        <p style="color: #999; font-size: 14px; margin: 5px 0;">Feature: {regression['feature']}</p>
+                    </div>
+                    """, unsafe_allow_html=True)
+                    
+                    with st.expander("📖 View Detailed Root Cause Analysis", expanded=False):
+                        # Root Cause Section
+                        st.markdown("### 🎯 Root Cause Analysis")
+                        
+                        if analysis.get("analysis_type") == "llm_powered":
+                            provider = analysis.get("provider", "AI")
+                            st.success(f"🤖 Powered by {provider}")
+                        
+                        explanation = analysis.get("detailed_explanation", "No analysis available")
+                        st.markdown(explanation)
+                        
+                        # Show exact line changes
+                        st.markdown("---")
+                        st.markdown("### 📝 Exact Changes That Caused This Failure")
+                        
+                        relevant_changes = []
+                        for file_change in report.get("detailed_file_changes", []):
+                            if any(keyword in file_change['file_path'].lower() 
+                                   for keyword in ['feature', 'step', 'page', 'locator']):
+                                relevant_changes.append(file_change)
+                        
+                        if relevant_changes:
+                            for file_change in relevant_changes[:3]:
+                                st.markdown(f"**📄 {file_change['file_path']}**")
+                                st.caption(file_change['summary'])
+                                
+                                for line_change in file_change["line_changes"][:5]:
+                                    if line_change['change_type'] == 'modified':
+                                        col1, col2 = st.columns(2)
+                                        with col1:
+                                            st.markdown(f"**❌ Line {line_change['line_number']} (Before)**")
+                                            st.code(line_change.get('old_content', ''), language="text")
+                                        with col2:
+                                            st.markdown(f"**✅ Line {line_change['line_number']} (After)**")
+                                            st.code(line_change.get('new_content', ''), language="text")
+                                        
+                                        st.markdown("**💡 Impact:** This change directly affected test behavior")
+                                        st.markdown("---")
+                                    
+                                    elif line_change['change_type'] == 'added':
+                                        st.markdown(f"**➕ Line {line_change['line_number']} (Added)**")
+                                        st.code(line_change.get('new_content', ''), language="text")
+                                        st.markdown("**💡 Impact:** New code introduced")
+                                        st.markdown("---")
+                                    
+                                    elif line_change['change_type'] == 'removed':
+                                        st.markdown(f"**➖ Line {line_change['line_number']} (Removed)**")
+                                        st.code(line_change.get('old_content', ''), language="text")
+                                        st.markdown("**💡 Impact:** Code removed")
+                                        st.markdown("---")
+                        else:
+                            st.info("No specific line changes identified. Check commit details in the Commits tab.")
+                        
+                        # Error details
+                        st.markdown("---")
+                        st.markdown("### 🐛 Error Details")
+                        
+                        col1, col2 = st.columns([2, 1])
+                        with col1:
+                            error_msg = regression.get("error_message", "No error message")
+                            st.code(error_msg, language="text")
+                        
+                        with col2:
+                            st.metric(
+                                "Duration Change",
+                                f"{regression['current_duration_ms']:.0f}ms",
+                                f"+{regression['current_duration_ms'] - regression['baseline_duration_ms']:.0f}ms"
+                            )
+                        
+                        # Key Points
+                        st.markdown("---")
+                        st.markdown("### 📌 Key Points")
+                        
+                        lines = explanation.split('\n')
+                        key_points = []
+                        for line in lines:
+                            line = line.strip()
+                            if line.startswith('- ') or line.startswith('* ') or line.startswith('1.') or line.startswith('2.') or line.startswith('3.'):
+                                key_points.append(line)
+                        
+                        if key_points:
+                            for point in key_points[:5]:
+                                st.markdown(point)
+                        else:
+                            st.markdown("- Test failed due to code changes")
+                            st.markdown("- Review the detailed explanation above")
+                            st.markdown("- Check exact line changes in the previous section")
+        else:
+            st.success("✅ No regressions found - all previously passing tests still pass!")
+        
+        # Test Improvements - Tests that now pass
+        st.divider()
+        st.subheader("✅ Tests That Passed (Previously Failed)")
+        
+        improvements = report.get("improvements", [])
+        
+        if improvements:
+            st.success(f"**{len(improvements)} test(s) improved** - Previously failing tests now passing!")
+            
+            with st.expander(f"View All Improvements ({len(improvements)})", expanded=True):
+                st.markdown("### 🎉 What Changed to Fix These Tests?")
+                
+                for improvement in improvements:
+                    st.markdown(f"""
+                    <div style="background-color: #1e2d1e; border-left: 4px solid #22c55e; padding: 15px; margin: 10px 0; border-radius: 4px;">
+                        <h4 style="color: #22c55e; margin: 0;">✅ {improvement}</h4>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                st.markdown("---")
+                st.markdown("### 📝 Code Changes That Fixed Issues")
+                
+                # Show relevant positive changes
+                if commits:
+                    st.markdown("**Recent commits that may have fixed these tests:**")
+                    for commit in commits[:5]:
+                        # Extract commit message first line outside f-string
+                        commit_msg_first_line = commit['message'].split('\n')[0] if '\n' in commit['message'] else commit['message']
+                        commit_author = commit['author']['name']
+                        commit_sha = commit['sha'][:8]
+                        commit_insertions = commit['stats']['total_insertions']
+                        commit_deletions = commit['stats']['total_deletions']
+                        
+                        st.markdown(f"""
+                        **🔑 `{commit_sha}`** - {commit_msg_first_line}  
+                        👤 {commit_author} | {commit_insertions} additions, {commit_deletions} deletions
+                        """)
+                
+                st.info("💡 **Analysis:** These tests now pass because the code changes corrected previous issues. Review the commits above to understand what was fixed.")
+        else:
+            st.info("ℹ️ No improvements detected - no previously failing tests have been fixed in this run.")
+        
+        # Quick Summary for other regressions
         quick_regressions = [r for r in report["regressions"] 
                             if "Not analyzed in detail" in str(r.get("analysis", {}).get("root_cause", ""))]
         
-        if detailed_regressions:
-            st.markdown(f"**🔬 Detailed AI Analysis ({len(detailed_regressions)} regressions)**")
-            
-            for i, regression in enumerate(detailed_regressions):
-                analysis = regression.get("analysis", {})
-                
-                explanation = analysis.get("detailed_explanation", "")
-                summary_line = explanation.split('\n')[0] if explanation else "No summary available"
-                if len(summary_line) > 100:
-                    summary_line = summary_line[:100] + "..."
-                
-                st.markdown(f"""
-                <div class="summary-box">
-                    <div class="summary-text">❌ {regression['scenario_name']}</div>
-                    <div style="color: #ccc; font-size: 14px;">{summary_line}</div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                with st.expander("📖 View Full Analysis", expanded=False):
-                    col1, col2 = st.columns([2, 1])
-                    
-                    with col1:
-                        st.markdown("**🤖 AI Analysis**")
-                        if analysis.get("analysis_type") == "llm_powered":
-                            provider = analysis.get("provider", "AI")
-                            st.success(f"Powered by {provider}")
-                        
-                        st.markdown(explanation)
-                    
-                    with col2:
-                        st.markdown("**📊 Metrics**")
-                        st.metric(
-                            "Duration Change",
-                            f"{regression['current_duration_ms']:.0f}ms",
-                            f"+{regression['current_duration_ms'] - regression['baseline_duration_ms']:.0f}ms"
-                        )
-                        
-                        st.markdown("**🐛 Error Details**")
-                        error_msg = regression.get("error_message", "No error message")
-                        if len(error_msg) > 200:
-                            st.code(error_msg[:200] + "\n...", language="text")
-                            if st.button("Show Full Error", key=f"err_{i}"):
-                                st.code(error_msg, language="text")
-                        else:
-                            st.code(error_msg, language="text")
-        
         if quick_regressions:
             st.divider()
-            st.markdown(f"**📋 Quick Summary ({len(quick_regressions)} lower priority regressions)**")
+            st.markdown(f"### ⚠️ Other Regressions ({len(quick_regressions)} lower priority)")
             
-            for regression in quick_regressions:
-                with st.expander(f"⚠️ {regression['scenario_name']}"):
-                    col1, col2 = st.columns([2, 1])
-                    with col1:
-                        st.markdown(f"**Feature:** {regression['feature']}")
-                        if regression.get('error_message'):
-                            st.code(regression['error_message'][:200], language="text")
-                    with col2:
-                        st.metric("Duration", f"{regression['current_duration_ms']:.0f}ms")
+            with st.expander("View Other Regressions"):
+                for regression in quick_regressions:
+                    st.markdown(f"**{regression['scenario_name']}** ({regression['feature']})")
+                    if regression.get('error_message'):
+                        st.code(regression['error_message'][:200], language="text")
+                    st.markdown("---")
+        
+        # Key Findings
+        if report.get("key_findings"):
+            st.divider()
+            st.subheader("🔍 Key Findings")
+            for finding in report["key_findings"]:
+                st.warning(finding)
 
 with tab2:
     st.header("📦 Commit History")
@@ -917,7 +1318,7 @@ with tab2:
         
         st.divider()
         
-        st.subheader("🔍 Search commits")
+        st.subheader("�� Search commits")
         search_query = st.text_input(
             "Search by message, author, or hash...",
             placeholder="Search by message, author, or hash...",
@@ -1153,13 +1554,15 @@ with tab5:
             )
         
         with col2:
+            # Fix for f-string backslash issue
+            findings_text = "\n".join(f"- {f}" for f in report.get("key_findings", []))
             markdown_summary = f"""# QA Intelligence Report
 Generated: {st.session_state.analysis_timestamp}
 
 {report["executive_summary"]}
 
 ## Key Findings
-{chr(10).join(f"- {f}" for f in report.get("key_findings", []))}
+{findings_text}
 """
             st.download_button(
                 "📄 Download Markdown",
