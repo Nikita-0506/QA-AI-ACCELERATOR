@@ -8,14 +8,30 @@ pipeline {
         }
         stage('Run tests') {
             steps {
-                bat 'pytest --maxfail=1 --disable-warnings --junitxml=reports\\results.xml'
+                bat 'pytest --junitxml=html-reports/pytest_report.xml --html=html-reports/report.html'
             }
         }
         stage('Archive reports') {
             steps {
-                junit 'reports/results.xml'
-                archiveArtifacts artifacts: 'reports/results.xml', allowEmptyArchive: true
+                junit 'html-reports/pytest_report.xml'
+                archiveArtifacts artifacts: 'html-reports/pytest_report.xml', allowEmptyArchive: true
             }
+        }
+    }
+    post {
+        always {
+            // Archive the XML report for reference
+            archiveArtifacts artifacts: 'html-reports/pytest_report.xml', allowEmptyArchive: true
+
+            // Publish the HTML report (make sure pytest generates it)
+            publishHTML([
+                reportDir: 'html-reports',
+                reportFiles: 'report.html',
+                reportName: 'Test Report',
+                keepAll: true,
+                alwaysLinkToLastBuild: true,
+                allowMissing: true
+            ])
         }
     }
 }
