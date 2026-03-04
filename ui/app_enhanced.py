@@ -508,6 +508,8 @@ if 'report' in st.session_state and st.session_state.metrics:
             <div class="metric-value">{metrics['test_reports']}</div>
             <div class="metric-label">TEST REPORTS</div>
         </div>
+
+        
         """, unsafe_allow_html=True)
     
     with col3:
