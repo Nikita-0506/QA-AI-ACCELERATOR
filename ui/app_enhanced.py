@@ -887,7 +887,280 @@ with tab3:
             st.warning("No reports found in dataset. Place JSON reports in html-reports/ folder")
 
 with tab4:
-    st.header("📜 History")
+
+    st.header("Code Changes — Detailed Line by Line")
+    st.markdown("All commit changes with specific file modifications and line-by-line code diffs")
+    
+    if 'commits' in st.session_state and st.session_state.commits:
+        commits = st.session_state.commits
+        
+        # Calculate and display impact summary
+        impact = calculate_commit_impact(commits)
+        
+        # Impact summary card
+        st.markdown(f"""
+        <div class="changes-summary-card">
+            <div class="changes-summary-title">📊 Overall Commit Impact</div>
+            <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px;">
+                <div style="text-align: center;">
+                    <div style="font-size: 24px; font-weight: 600; color: #c9d1d9;">📦 {impact['total_commits']}</div>
+                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Total Commits</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 24px; font-weight: 600; color: #7ee787;">+ {impact['total_insertions']}</div>
+                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Lines Added</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 24px; font-weight: 600; color: #f85149;">- {impact['total_deletions']}</div>
+                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Lines Deleted</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 24px; font-weight: 600; color: #79c0ff;">📄 {len(impact['files_changed'])}</div>
+                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Files Modified</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 24px; font-weight: 600; color: #d29922;">👤 {len(impact['authors'])}</div>
+                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Contributors</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.divider()
+        
+        # Select commit to view
+        st.subheader("💻 Select Commit to View Changes")
+        
+        commits_with_changes = [c for c in commits if c.get('changed_files') and len(c.get('changed_files', [])) > 0]
+        
+        if commits_with_changes:
+            selected_commit_idx = st.selectbox(
+                "Choose a commit",
+                range(len(commits_with_changes)),
+                format_func=lambda i: f"{commits_with_changes[i]['sha'][:8]} — {commits_with_changes[i]['message'].split(chr(10))[0][:70]}"
+            )
+            
+            selected_commit = commits_with_changes[selected_commit_idx]
+            
+            # Commit metadata
+            st.markdown(f"""
+            <div class="dark-code-container" style="margin-bottom: 16px;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                    <div>
+                        <div style="color: #8b949e; font-size: 12px;">COMMIT SHA</div>
+                        <div style="color: #79c0ff; font-family: monospace; margin-top: 4px;">{selected_commit['sha']}</div>
+                    </div>
+                    <div>
+                        <div style="color: #8b949e; font-size: 12px;">AUTHOR</div>
+                        <div style="color: #c9d1d9; margin-top: 4px;">{selected_commit['author']['name']}</div>
+                    </div>
+                    <div style="grid-column: 1 / -1;">
+                        <div style="color: #8b949e; font-size: 12px;">DATE</div>
+                        <div style="color: #c9d1d9; margin-top: 4px;">{selected_commit['date']}</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Commit message
+            st.markdown(f"""
+            <div class="dark-code-container" style="margin-bottom: 16px; border-left: 3px solid #79c0ff;">
+                <div style="color: #79c0ff; font-weight: 600; margin-bottom: 8px;">COMMIT MESSAGE</div>
+                <div style="color: #c9d1d9; white-space: pre-wrap; font-family: monospace;">{selected_commit['message']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Get changed files for this commit
+            changed_files = selected_commit.get('changed_files', [])
+            
+            # ============ SHOW WHAT IMPACT THOSE CHANGES HAVE MADE ============
+            st.markdown("### 📈 Show what impact those changes have made in the commit")
+            
+            # Get commit stats
+            commit_stats = selected_commit.get('stats', {})
+            total_files = commit_stats.get('total_files', len(changed_files))
+            total_insertions = commit_stats.get('total_insertions', 0)
+            total_deletions = commit_stats.get('total_deletions', 0)
+            
+            # Calculate potential impact on tests
+            report = st.session_state.get('report', {})
+            all_regressions = report.get('regressions', [])
+            
+            # For each changed file, try to find related regressions
+            changed_file_paths = [f.get('file', '').lower() for f in changed_files]
+            
+            # Identify potentially affected tests (heuristic: test/feature files match)
+            related_regressions = []
+            for regression in all_regressions:
+                regression_feature = regression.get('feature', '').lower()
+                # Check if any changed file might be related to this test
+                for changed_file in changed_file_paths:
+                    # Match feature names or common patterns
+                    if regression_feature and regression_feature in changed_file or changed_file in regression_feature:
+                        if regression not in related_regressions:
+                            related_regressions.append(regression)
+                        break
+            
+            # Display impact metrics
+            col1, col2, col3, col4 = st.columns(4)
+            
+            with col1:
+                st.metric(
+                    "📁 Files Changed",
+                    total_files,
+                    delta=None
+                )
+            
+            with col2:
+                st.metric(
+                    "➕ Lines Added",
+                    total_insertions,
+                    delta=f"+{total_insertions}"
+                )
+            
+            with col3:
+                st.metric(
+                    "➖ Lines Deleted",
+                    total_deletions,
+                    delta=f"-{total_deletions}"
+                )
+            
+            with col4:
+                st.metric(
+                    "🧪 Related Tests",
+                    len(related_regressions),
+                    delta=f"{len(related_regressions)} affected" if related_regressions else "No direct match"
+                )
+            
+            # Show related failing tests if any
+            if related_regressions:
+                st.divider()
+                st.markdown("#### 🔴 Related Test Failures")
+                
+                for i, regression in enumerate(related_regressions[:5]):  # Show top 5
+                    analysis = regression.get('analysis', {})
+                    explanation = analysis.get('detailed_explanation', '')
+                    summary_line = explanation.split('\n')[0] if explanation else "Test failure - see details"
+                    if len(summary_line) > 120:
+                        summary_line = summary_line[:120] + "..."
+                    
+                    st.markdown(f"""
+                    <div class="summary-box">
+                        <div class="summary-text">❌ {regression['scenario_name']}</div>
+                        <div style="color: #888; font-size: 12px; margin: 4px 0;">Feature: {regression.get('feature', 'N/A')}</div>
+                        <div style="color: #ccc; font-size: 13px;">{summary_line}</div>
+                    </div>
+                    """, unsafe_allow_html=True)
+                
+                if len(related_regressions) > 5:
+                    st.caption(f"and {len(related_regressions) - 5} more related failures...")
+            else:
+                st.divider()
+                st.info("💡 **No directly related test failures detected** — The changed files do not appear to be tested by current failures.")
+            
+            st.divider()
+            
+            # Files changed summary
+            if changed_files:
+                
+                # # Header with file count
+                # st.markdown(f"""
+                # <div style="background-color: #0d1117; padding: 16px; border-radius: 6px; margin-bottom: 16px;">
+                #     <div style="color: #c9d1d9; font-size: 18px; font-weight: 600;">
+                #         📁 Files Changed ({len(changed_files)} file{'s' if len(changed_files) != 1 else ''})
+                #     </div>
+                # </div>
+                # """, unsafe_allow_html=True)
+                
+                # # Files summary with badges - collapsible list
+                # with st.expander("📋 View Files Summary", expanded=True):
+                #     for file_change in changed_files:
+                #         file_path = file_change.get('file', '')
+                #         insertions = file_change.get('insertions', 0)
+                #         deletions = file_change.get('deletions', 0)
+                        
+                #         st.markdown(f"""
+                #         <div class="dark-file-summary">
+                #             <span class="dark-file-name">{file_path}</span>
+                #             <div>
+                #                 <span class="dark-badge dark-badge-add">+ {insertions}</span>
+                #                 <span class="dark-badge dark-badge-del">- {deletions}</span>
+                #             </div>
+                #         </div>
+                #         """, unsafe_allow_html=True)
+                
+                # st.divider()
+                
+                # Show all diffs for this commit
+                diffs = selected_commit.get('diffs', [])
+                
+                # Always show section header
+                st.markdown("### 🔍 Detailed Code Changes — Line by Line")
+                
+                if diffs:
+                    diffs_with_content = [d for d in diffs if d.get('diff')]
+                    
+                    if diffs_with_content:
+                        # Show each file as expandable/collapsible section
+                        for idx, diff_item in enumerate(diffs_with_content):
+                            file_path = diff_item.get('new_path') or diff_item.get('old_path') or 'unknown'
+                            change_type = (diff_item.get('change_type') or 'modified').upper()
+                            
+                            # Get stats for this file
+                            file_stats = next(
+                                (f for f in changed_files if f['file'] == file_path),
+                                {'insertions': 0, 'deletions': 0}
+                            )
+                            
+                            insertions = file_stats.get('insertions', 0)
+                            deletions = file_stats.get('deletions', 0)
+                            
+                            # Display file as expandable with badge
+                            expander_label = f"📄 {file_path} — {change_type} (+{insertions} -{deletions})"
+                            
+                            with st.expander(expander_label, expanded=False):
+                                # Display the dark-themed diff inside expander (without redundant header)
+                                diff_text = diff_item.get('diff', '')
+                                if diff_text:
+                                    display_dark_diff(
+                                        diff_text,
+                                        file_path,
+                                        insertions,
+                                        deletions,
+                                        show_header=False
+                                    )
+                                else:
+                                    st.markdown(f"""
+                                    <div class="dark-code-container">
+                                        <div style="color: #8b949e;">No diff content available</div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                    else:
+                        st.markdown("""
+                        <div class="dark-code-container">
+                            <div style="color: #f59e0b;">⚠️ No detailed diffs available for this commit</div>
+                            <div style="color: #8b949e; margin-top: 8px; font-size: 14px;">
+                                File changes are recorded above, but line-by-line diffs were not captured during analysis.
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.markdown("""
+                    <div class="dark-code-container">
+                        <div style="color: #f59e0b;">⚠️ No diff data available for this commit</div>
+                        <div style="color: #8b949e; margin-top: 8px; font-size: 14px;">
+                            This may happen if the commit analysis didn't include detailed diffs. Try re-running the analysis or selecting a different commit.
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+        else:
+            st.info("No commits with file changes available")
+    else:
+        st.info("Run analysis first to see code changes")
+
+with tab5:
+    st.header("�📜 History")
+
     
     if 'report' in st.session_state:
         report = st.session_state.report
