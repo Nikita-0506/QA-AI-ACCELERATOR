@@ -1906,61 +1906,173 @@ with tab5:
 
 
 with tab6:
-    st.header("�📜 History")
-
-
-
+     st.header("📜 History")
     
-    if 'report' in st.session_state:
+    # --- Folder-style History Tab ---
+     st.markdown("View all previous analysis results, commits, baseline tests, and current test reports. Each analysis is saved as a folder with expandable sections.")
+
+    # --- History logic: Save new analysis ---
+     history = st.session_state.get('history', [])
+    # If a new report exists and not already in history, append it
+     if 'report' in st.session_state and st.session_state.report:
         report = st.session_state.report
-        
-        st.subheader("📝 Code Changes")
-        for file_change in report["detailed_file_changes"][:10]:
-            with st.expander(f"📄 {file_change['file_path']}"):
-                st.caption(file_change['summary'])
-                
-                for line_change in file_change["line_changes"][:5]:
-                    if line_change['change_type'] == 'modified':
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.markdown(f"**Line {line_change['line_number']} (Before)**")
-                            st.code(line_change.get('old_content', ''), language="text")
-                        with col2:
-                            st.markdown(f"**Line {line_change['line_number']} (After)**")
-                            st.code(line_change.get('new_content', ''), language="text")
-        
-        st.divider()
-        
-        st.subheader("📥 Export Report")
-        report_json = json.dumps(report, indent=2, default=str)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button(
-                "📥 Download JSON",
-                data=report_json,
-                file_name=f"analysis_{st.session_state.analysis_timestamp.replace(' ', '_').replace(':', '-')}.json" if st.session_state.analysis_timestamp else "analysis.json",
-                mime="application/json",
-                use_container_width=True
-            )
-        
-        with col2:
-            # Fix for f-string backslash issue
-            findings_text = "\n".join(f"- {f}" for f in report.get("key_findings", []))
-            markdown_summary = f"""# QA Intelligence Report
+        # Build history entry from report and other session state
+        new_entry = {
+            'timestamp': st.session_state.analysis_timestamp or datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'title': 'Analysis',
+            'executive_summary': report.get('executive_summary', ''),
+            'test_run_summary': report.get('test_run_summary', ''),
+            'commits_analyzed': report.get('commits_analyzed', ''),
+            'key_findings': report.get('key_findings', []),
+            'repo_name': st.session_state.get('dataset_name', ''),
+            'commit_range': f"{st.session_state.get('baseline_ref', '')} → {st.session_state.get('current_ref', '')}",
+            'commits': st.session_state.get('commits', []),
+            'test_reports_preview': [report.get('test_summary', {})],
+            'detailed_file_changes': report.get('detailed_file_changes', []),
+            # Save commit inference results if present
+            'commit_inference': st.session_state.get('inference_results', []),
+        }
+        # Only append if not already present (avoid duplicates)
+        if not history or new_entry['timestamp'] != history[-1].get('timestamp'):
+            history.append(new_entry)
+            st.session_state['history'] = history
+            # Save to file for persistence
+            history_file = Path("history.json")
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=2, default=str)
+
+    # Load history from file if session empty
+     if not history:
+        history_file = Path("history.json")
+        if history_file.exists():
+            with open(history_file, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+            st.session_state['history'] = history
+
+     if history:
+        delete_index = None
+        for idx, entry in enumerate(history[::-1]):  # Show newest first
+            real_idx = len(history) - 1 - idx
+            col_exp, col_del = st.columns([12, 1])
+            with col_exp:
+                expander = st.expander(f"🗂️ {entry.get('timestamp', 'Unknown')} — {entry.get('title', 'Analysis')}", expanded=False)
+            with col_del:
+                if st.button("🗑️", key=f"delete_{entry.get('timestamp','')}", help="Delete this analysis"):
+                    delete_index = real_idx
+            with expander:
+                # Analysis Results
+                st.markdown("### 📋 Analysis Results")
+                st.markdown(f"**Generated:** {entry.get('timestamp', 'Unknown')}")
+                st.markdown(f"**Executive Summary:**")
+                st.markdown(entry.get('executive_summary', ''))
+                st.markdown(entry.get('test_run_summary', ''))
+                if entry.get('key_findings', []):
+                    for finding in entry.get('key_findings', []):
+                        st.markdown(f"- {finding}")
+                st.markdown("<hr style='border: none; border-top: 1px solid #444; margin: 8px 0;'>", unsafe_allow_html=True)
+
+                    # Commit Inference Results
+                if entry.get('commit_inference', []):
+                        st.markdown("### 🧠 Commit Inference Results")
+                        for idx, item in enumerate(entry['commit_inference']):
+                            pair, inference_text = item
+                            older = pair.get('older', {})
+                            newer = pair.get('newer', {})
+                            label = f"**{older.get('sha','')[:8]}** → **{newer.get('sha','')[:8]}**  ·  {newer.get('message','')[:70]}"
+                            with st.expander(label, expanded=(idx == 0)):
+                                st.markdown(inference_text)
+                        st.markdown("<hr style='border: none; border-top: 1px solid #444; margin: 8px 0;'>", unsafe_allow_html=True)
+                # Commit History
+                st.markdown("### 📦 Commit History")
+                st.markdown(f"**Repository:** {repo_url.split('/')[-1]} | **Commits:** {start_commit} to {end_commit} ({len(entry.get('commits', []))} total)")
+                st.markdown(f"**Commits:** {entry.get('commit_range', '')}")
+                for commit in entry.get('commits', []):
+                    sha = commit.get('sha', '')[:8]
+                    message = commit.get('message', '')
+                    author = commit.get('author', {}).get('name', '')
+                    date = commit.get('date', '')
+                    st.markdown(f"<div style='border-radius:6px;background:#23272f;padding:12px;margin-bottom:8px;'>", unsafe_allow_html=True)
+                    st.markdown(f"<b>{sha}</b> — {message[:80]}", unsafe_allow_html=True)
+                    st.markdown(f"<b>Author:</b> {author}", unsafe_allow_html=True)
+                    st.markdown(f"<b>Date:</b> {date}", unsafe_allow_html=True)
+                    st.markdown(f"<b>Message:</b> {message}", unsafe_allow_html=True)
+                    if 'changed_files' in commit and commit['changed_files']:
+                        st.markdown(f"<b>Files Changed:</b> {len(commit['changed_files'])}", unsafe_allow_html=True)
+                        for file in commit['changed_files'][:5]:
+                            st.markdown(f"<span style='background:#212d21;color:#4ade80;padding:4px 8px;border-radius:4px;margin-right:4px;'> {file['file']} </span>", unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown("<hr style='border: none; border-top: 1px solid #444; margin: 8px 0;'>", unsafe_allow_html=True)
+
+                # Test Reports
+                st.markdown("### 📊 Test Reports")
+                st.markdown(f"#### Test Reports Preview")
+                for report_preview in entry.get('test_reports_preview', []):
+                    st.json(report_preview)
+                st.markdown("<hr style='border: none; border-top: 1px solid #444; margin: 8px 0;'>", unsafe_allow_html=True)
+
+                # Code Changes
+                st.markdown("### 📝 Code Changes")
+                for file_change in entry.get("detailed_file_changes", [])[:10]:
+                    st.markdown(f"#### 📄 {file_change['file_path']}")
+                    st.caption(file_change['summary'])
+                    for line_change in file_change.get("line_changes", [])[:5]:
+                        if line_change['change_type'] == 'modified':
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.markdown(f"<span style='color:#e74c3c;font-weight:bold;'>Line {line_change['line_number']} (Before)</span>", unsafe_allow_html=True)
+                                st.markdown(f"<pre style='background:#2c2c2c;color:#e74c3c;border-radius:4px;padding:8px;'>{line_change.get('old_content', '')}</pre>", unsafe_allow_html=True)
+                            with col2:
+                                st.markdown(f"<span style='color:#27ae60;font-weight:bold;'>Line {line_change['line_number']} (After)</span>", unsafe_allow_html=True)
+                                st.markdown(f"<pre style='background:#2c2c2c;color:#27ae60;border-radius:4px;padding:8px;'>{line_change.get('new_content', '')}</pre>", unsafe_allow_html=True)
+                st.markdown("<hr style='border: none; border-top: 1px solid #444; margin: 8px 0;'>", unsafe_allow_html=True)
+
+        if delete_index is not None:
+            del history[delete_index]
+            st.session_state['history'] = history
+            history_file = Path("history.json")
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=2, default=str)
+            st.experimental_rerun()
+
+        if delete_index is not None:
+            del history[delete_index]
+            st.session_state['history'] = history
+            history_file = Path("history.json")
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=2, default=str)
+            st.experimental_rerun()
+
+        # Export Report section (unchanged)
+        if 'report' in st.session_state:
+            report = st.session_state.report
+            st.subheader("📥 Export Report")
+            report_json = json.dumps(report, indent=2, default=str)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "📥 Download JSON",
+                    data=report_json,
+                    file_name=f"analysis_{st.session_state.analysis_timestamp.replace(' ', '_').replace(':', '-')}.json" if st.session_state.analysis_timestamp else "analysis.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            with col2:
+                markdown_summary = f"""# QA Intelligence Report
 Generated: {st.session_state.analysis_timestamp}
 
 {report["executive_summary"]}
 
 ## Key Findings
-{findings_text}
+{chr(10).join(f"- {f}" for f in report.get("key_findings", []))}
 """
-            st.download_button(
-                "📄 Download Markdown",
-                data=markdown_summary,
-                file_name=f"summary_{st.session_state.analysis_timestamp.replace(' ', '_').replace(':', '-')}.md" if st.session_state.analysis_timestamp else "summary.md",
-                mime="text/markdown",
-                use_container_width=True
-            )
-    else:
-        st.info("Run analysis first to see history and export options")
+                st.download_button(
+                    "📄 Download Markdown",
+                    data=markdown_summary,
+                    file_name=f"summary_{st.session_state.analysis_timestamp.replace(' ', '_').replace(':', '-')}.md" if st.session_state.analysis_timestamp else "summary.md",
+                    mime="text/markdown",
+                    use_container_width=True
+                )
+        else:
+            st.info("Run analysis first to see history and export options")
+     else:
+        st.info("No history found. Run analysis to save results.")
