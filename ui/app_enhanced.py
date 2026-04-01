@@ -169,6 +169,30 @@ TEMPERATURE = 0.10
 S3_BUCKET_NAME = os.getenv("S3_BUCKET_NAME", "qa-accelerator-inadev")
 S3_REPORTS_PREFIX = os.getenv("S3_REPORTS_PREFIX", "all_reports/")
 
+# Local reports directory (fallback when S3 is not configured)
+LOCAL_REPORTS_DIR = Path(__file__).parent.parent / "html-reports"
+
+
+# ── Local Reports Helper ─────────────────────────────────────
+
+def load_local_reports():
+    """Load JSON report files from the local html-reports directory."""
+    result = {"json_reports": [], "html_reports": []}
+    if not LOCAL_REPORTS_DIR.exists():
+        return result
+    for f in sorted(LOCAL_REPORTS_DIR.iterdir()):
+        if f.suffix.lower() == ".json":
+            try:
+                result["json_reports"].append((f.name, f.read_text(encoding="utf-8")))
+            except Exception:
+                pass
+        elif f.suffix.lower() in (".html", ".htm"):
+            try:
+                result["html_reports"].append((f.name, f.read_bytes()))
+            except Exception:
+                pass
+    return result
+
 
 # ── S3 Helper Functions ─────────────────────────────────────
 
@@ -177,8 +201,7 @@ def get_s3_client():
     try:
         return boto3.client("s3")
     except NoCredentialsError:
-        st.warning("AWS credentials not found. Configure IAM role or AWS credentials.")
-        return None
+        return None  # S3 not configured — silently fall back to local reports
 
 
 def list_s3_report_folders():
@@ -205,6 +228,8 @@ def list_s3_report_folders():
 
         st.session_state.commits_cache[cache_key] = folders
         return folders
+    except NoCredentialsError:
+        return []  # S3 not configured — silently fall back to local reports
     except (ClientError, Exception) as e:
         st.warning(f"Could not list S3 folders: {e}")
         return []
@@ -248,6 +273,8 @@ def download_s3_reports(folder_name):
 
         st.session_state.commits_cache[cache_key] = result
         return result
+    except NoCredentialsError:
+        return {"json_reports": [], "html_reports": []}  # S3 not configured
     except (ClientError, Exception) as e:
         st.warning(f"Could not download reports from S3: {e}")
         return {"json_reports": [], "html_reports": []}
@@ -688,7 +715,7 @@ with st.sidebar:
     
     repo_url = st.text_input(
         "Git Repository URL",
-        value="https://github.com/Inadev-Data-Lab/QA_Playwright_Repo",
+        value="https://github.com/Nikita-0506/QA-AI-ACCELERATOR",
         help="GitHub repository URL"
     )
     
@@ -858,35 +885,49 @@ with tab1:
             )
         else:
             selected_s3_folder = None
-            st.warning("No report folders found in S3. Check bucket/prefix configuration.")
+            local_json_files = [f.name for f in LOCAL_REPORTS_DIR.iterdir() if f.suffix.lower() == ".json"] if LOCAL_REPORTS_DIR.exists() else []
+            if local_json_files:
+                st.info(f"📁 Using local reports from `html-reports/`: {', '.join(local_json_files)}")
+            else:
+                st.warning("No report folders found in S3 and no local JSON reports in `html-reports/`.")
 
     # Commit range slider — adjusts to the selected branch
     branch_total = branch_commit_counts.get(analysis_branch, 100)
-    commit_range = st.slider(
-        "📦 Commit Range (newest → oldest)",
-        min_value=1,
-        max_value=max(branch_total, 1),
-        value=(1, min(30, branch_total)),
-        help="Select range of commits to analyze (1 = newest commit)",
-    )
-    start_commit, end_commit = commit_range
+    if branch_total > 1:
+        commit_range = st.slider(
+            "📦 Commit Range (newest → oldest)",
+            min_value=1,
+            max_value=branch_total,
+            value=(1, min(30, branch_total)),
+            help="Select range of commits to analyze (1 = newest commit)",
+        )
+        start_commit, end_commit = commit_range
+    else:
+        start_commit, end_commit = 1, 1
+        st.info("📦 Commit Range: only 1 commit available on this branch.")
     st.caption(f"Analyzing commits **{start_commit}** to **{end_commit}** ({end_commit - start_commit + 1} commits) on **{analysis_branch}**")
 
-    # Download S3 reports when a folder is selected
+    # Load reports: prefer S3 folder, fall back to local html-reports/
     if selected_s3_folder:
-        s3_data = download_s3_reports(selected_s3_folder)
-        json_reports = s3_data.get("json_reports", [])
-        if len(json_reports) >= 2:
-            baseline_content = json_reports[0][1]
-            current_content = json_reports[1][1]
-            ready_status = True
-        elif len(json_reports) == 1:
-            # Single report mode — duplicate as both baseline and current
-            baseline_content = json_reports[0][1]
-            current_content = json_reports[0][1]
-            ready_status = True
-        else:
+        report_data = download_s3_reports(selected_s3_folder)
+    else:
+        report_data = load_local_reports()
+
+    json_reports = report_data.get("json_reports", [])
+    if len(json_reports) >= 2:
+        baseline_content = json_reports[0][1]
+        current_content = json_reports[1][1]
+        ready_status = True
+    elif len(json_reports) == 1:
+        # Single report mode — duplicate as both baseline and current
+        baseline_content = json_reports[0][1]
+        current_content = json_reports[0][1]
+        ready_status = True
+    else:
+        if selected_s3_folder:
             st.warning(f"No JSON reports found in folder **{selected_s3_folder}**.")
+        else:
+            st.warning("No JSON reports found. Add `.json` files to the `html-reports/` folder.")
 
     # ── Analyze button + status ─────────────────────────────────
     col1, col2 = st.columns([1, 2])
@@ -1680,15 +1721,19 @@ with tab4:
         # Compute a safe default upper bound for the slider
         inf_default_end = min(end_commit, inf_branch_total)
 
-        inf_range = st.slider(
-            "Commit range for inference",
-            min_value=1,
-            max_value=max(inf_branch_total, 1),
-            value=(1, max(inf_default_end, 1)),
-            key="inf_range_slider",
-            help="Pick the range of commits (1 = newest)",
-        )
-        inf_start, inf_end = inf_range
+        if inf_branch_total > 1:
+            inf_range = st.slider(
+                "Commit range for inference",
+                min_value=1,
+                max_value=inf_branch_total,
+                value=(1, max(inf_default_end, 2)),
+                key="inf_range_slider",
+                help="Pick the range of commits (1 = newest)",
+            )
+            inf_start, inf_end = inf_range
+        else:
+            inf_start, inf_end = 1, 1
+            st.info("Only 1 commit available on this branch for inference.")
 
     with inf_col2:
         run_inference = st.button(
