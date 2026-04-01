@@ -1,0 +1,11 @@
+cookie:
+  expiry_days: 1
+  key: qa_engine_secret_key_change_me
+  name: qa_engine_auth
+
+credentials:
+  usernames:
+    admin:
+      email: admin@inadev.com
+      name: Admin
+      password: $2b$12$8Ii4WQ3cKKGzv.vLOB/0WOePp446bFSYuc9e8J3TX2ppJasBCrx6O

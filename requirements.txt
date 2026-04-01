@@ -1,0 +1,35 @@
+# ── Core direct dependencies (pinned for reproducibility) ──
+# Azure OpenAI / LLM
+openai==2.24.0
+
+# Web UI
+streamlit==1.54.0
+
+# Git integration
+GitPython==3.1.46
+
+# HTTP
+requests==2.32.5
+
+# Data validation
+pydantic==2.12.5
+
+# Data analysis
+pandas==2.3.3
+numpy==2.4.2
+
+# XML parsing
+lxml==6.0.2
+
+# Environment config
+python-dotenv==1.2.1
+
+# Visualization
+plotly==6.5.2
+
+# AWS S3
+boto3==1.35.0
+
+# Authentication
+streamlit-authenticator==0.4.2
+PyYAML>=5.3.1
