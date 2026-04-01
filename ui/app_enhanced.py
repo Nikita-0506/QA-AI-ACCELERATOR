@@ -8,6 +8,9 @@ from io import StringIO
 from datetime import datetime
 import base64
 
+# Add missing import for requests
+import requests
+
 # Add parent to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
@@ -302,7 +305,31 @@ def extract_commits_by_range(repo_url, start_index, end_index, github_token=None
                         'file': file,
                         'insertions': stats['insertions'],
                         'deletions': stats['deletions'],
+                        'lines': stats['lines']
                     })
+                
+                # Get diffs (for detailed line-by-line analysis)
+                diffs = []
+                if commit.parents:
+                    parent = commit.parents[0]
+                    for diff in parent.diff(commit, create_patch=True):
+                        diff_data = {
+                            'change_type': diff.change_type,
+                            'old_path': diff.a_path,
+                            'new_path': diff.b_path,
+                        }
+                        
+                        if diff.diff:
+                            try:
+                                diff_text = diff.diff.decode('utf-8', errors='ignore')
+                                if len(diff_text) > 10000:
+                                    diff_data['diff'] = diff_text[:10000] + "\n... [truncated]"
+                                else:
+                                    diff_data['diff'] = diff_text
+                            except:
+                                diff_data['diff'] = None
+                        
+                        diffs.append(diff_data)
                 
                 commits.append({
                     'sha': commit.hexsha,
@@ -313,9 +340,12 @@ def extract_commits_by_range(repo_url, start_index, end_index, github_token=None
                     'date': commit.committed_datetime.isoformat(),
                     'message': commit.message.strip(),
                     'changed_files': changed_files,
+                    'diffs': diffs,
                     'stats': {
+                        'total_files': len(changed_files),
                         'total_insertions': commit.stats.total['insertions'],
                         'total_deletions': commit.stats.total['deletions'],
+                        'total_lines': commit.stats.total['lines']
                     }
                 })
         
@@ -327,6 +357,29 @@ def extract_commits_by_range(repo_url, start_index, end_index, github_token=None
     except Exception as e:
         st.error(f"Failed to extract commits: {e}")
         return []
+
+
+# Calculate total impact from commits
+def calculate_commit_impact(commits):
+    """Calculate overall impact stats from a list of commits."""
+    total_commits = len(commits)
+    total_insertions = 0
+    total_deletions = 0
+    total_files = 0
+    
+    for commit in commits:
+        if isinstance(commit, dict) and 'stats' in commit:
+            stats = commit['stats']
+            total_insertions += stats.get('total_insertions', 0)
+            total_deletions += stats.get('total_deletions', 0)
+            total_files += stats.get('total_files', 0)
+    
+    return {
+        'total_commits': total_commits,
+        'total_insertions': total_insertions,
+        'total_deletions': total_deletions,
+        'total_files': total_files,
+    }
 
 
 # ── Pairwise commit inference helpers ──────────────────────────
@@ -592,6 +645,45 @@ with st.sidebar:
         # In "Commit Range" mode, reports come from dataset
         baseline_json = None
         current_json = None
+# Jenkins integration settings (update if needed)
+JENKINS_URL = os.getenv('JENKINS_URL', 'http://localhost:8080')
+JENKINS_JOB = os.getenv('JENKINS_JOB', 'qa_ai_accelerator')
+JENKINS_USER = os.getenv('JENKINS_USERNAME', 'admin')
+JENKINS_TOKEN = os.getenv('JENKINS_API_TOKEN', '')
+
+def fetch_jenkins_build_info():
+    """Fetch latest Jenkins build info and test report artifact."""
+    try:
+        api_url = f"{JENKINS_URL}/job/{JENKINS_JOB}/lastSuccessfulBuild/api/json"
+        auth = (JENKINS_USER, JENKINS_TOKEN) if JENKINS_TOKEN else None
+        resp = requests.get(api_url, auth=auth, timeout=10)
+        resp.raise_for_status()
+        build_info = resp.json()
+        # Find results.xml or pytest_report.xml artifact
+        artifact_url = None
+        artifact_name = None
+        for artifact in build_info.get('artifacts', []):
+            if artifact['fileName'] in ['results.xml', 'pytest_report.xml']:
+                artifact_url = f"{JENKINS_URL}/job/{JENKINS_JOB}/lastSuccessfulBuild/artifact/{artifact['relativePath']}"
+                artifact_name = artifact['fileName']
+                break
+        return build_info, artifact_url, artifact_name
+    except Exception as e:
+        return None, None, None
+
+# --- Jenkins Results Section ---
+st.sidebar.markdown('---')
+st.sidebar.header('Jenkins Test Results')
+build_info, artifact_url, artifact_name = fetch_jenkins_build_info()
+if build_info:
+    st.sidebar.success(f"Last build: #{build_info['number']} - {build_info['result']}")
+    st.sidebar.write(f"Built at: {datetime.fromtimestamp(build_info['timestamp']/1000).strftime('%Y-%m-%d %H:%M:%S')}")
+    if artifact_url:
+        st.sidebar.markdown(f"[📄 View {artifact_name}]({artifact_url})")
+    else:
+        st.sidebar.info('No test report artifact found.')
+else:
+    st.sidebar.warning('Could not fetch Jenkins build info.')
 
 # Main content area
 st.title("🧪 Testing Engine")
@@ -658,9 +750,10 @@ if 'report' in st.session_state and st.session_state.metrics:
     st.markdown("<br>", unsafe_allow_html=True)
 
 # Tabs
-tab1, tab2, tab3, tab4, tab5 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
     "🤖 AI Analysis",
     "📦 Commits",
+    "🔧 Code Changes",
     "🔍 Commit Inference",
     "📊 Test Reports",
     "📜 History"
@@ -1349,8 +1442,253 @@ with tab2:
                         st.markdown(f"- `{file['file']}`")
     else:
         st.info("Run analysis first to see commit history")
-
 with tab3:
+    st.header("🔧 Code Changes ")
+    st.markdown("All commit changes with specific file modifications and line-by-line code diffs")
+    
+    if 'commits' in st.session_state and st.session_state.commits:
+        commits = st.session_state.commits
+        
+        # Calculate and display impact summary
+        impact = calculate_commit_impact(commits)
+        
+        # Impact summary card
+        st.markdown(f"""
+        <div class="changes-summary-card">
+            <div class="changes-summary-title">📊 Overall Commit Impact</div>
+            <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px;">
+                <div style="text-align: center;">
+                    <div style="font-size: 24px; font-weight: 600; color: #c9d1d9;">📦 {impact['total_commits']}</div>
+                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Total Commits</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 24px; font-weight: 600; color: #7ee787;">+ {impact['total_insertions']}</div>
+                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Lines Added</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 24px; font-weight: 600; color: #f85149;">- {impact['total_deletions']}</div>
+                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Lines Deleted</div>
+                </div>
+                <div style="text-align: center;">
+                    <div style="font-size: 24px; font-weight: 600; color: #79c0ff;">📄 {impact['total_files']}</div>
+                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Files Modified</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        
+        st.divider()
+        
+        # Select commit to view
+        st.subheader("💻 Select Commit to View Changes")
+        
+        commits_with_changes = [c for c in commits if c.get('changed_files') and len(c.get('changed_files', [])) > 0]
+        
+        if commits_with_changes:
+            selected_commit_idx = st.selectbox(
+                "Choose a commit",
+                range(len(commits_with_changes)),
+                format_func=lambda i: f"{commits_with_changes[i]['sha'][:8]} — {commits_with_changes[i]['message'].split(chr(10))[0][:70]}"
+            )
+            
+            selected_commit = commits_with_changes[selected_commit_idx]
+            
+            # Commit metadata
+            st.markdown(f"""
+            <div class="dark-code-container" style="margin-bottom: 16px;">
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
+                    <div>
+                        <div style="color: #8b949e; font-size: 12px;">COMMIT SHA</div>
+                        <div style="color: #79c0ff; font-family: monospace; margin-top: 4px;">{selected_commit['sha']}</div>
+                    </div>
+                    <div>
+                        <div style="color: #8b949e; font-size: 12px;">AUTHOR</div>
+                        <div style="color: #c9d1d9; margin-top: 4px;">{selected_commit['author']['name']}</div>
+                    </div>
+                    <div style="grid-column: 1 / -1;">
+                        <div style="color: #8b949e; font-size: 12px;">DATE</div>
+                        <div style="color: #c9d1d9; margin-top: 4px;">{selected_commit['date']}</div>
+                    </div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Commit message
+            st.markdown(f"""
+            <div class="dark-code-container" style="margin-bottom: 16px; border-left: 3px solid #79c0ff;">
+                <div style="color: #79c0ff; font-weight: 600; margin-bottom: 8px;">COMMIT MESSAGE</div>
+                <div style="color: #c9d1d9; white-space: pre-wrap; font-family: monospace;">{selected_commit['message']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+            
+            # Files changed summary
+            changed_files = selected_commit.get('changed_files', [])
+            if changed_files:
+                st.divider()
+                
+                # Show all diffs for this commit
+                diffs = selected_commit.get('diffs', [])
+                
+                # ============ SHOW IMPACT ANALYSIS FOR DETAILED VIEW ============
+                st.markdown("### 📈 Impact Summary for Code Changes")
+                
+                # Get commit stats
+                commit_stats = selected_commit.get('stats', {})
+                total_files = commit_stats.get('total_files', len(changed_files))
+                total_insertions = commit_stats.get('total_insertions', 0)
+                total_deletions = commit_stats.get('total_deletions', 0)
+                
+                # Calculate potential impact on tests
+                report = st.session_state.get('report', {})
+                all_regressions = report.get('regressions', [])
+                
+                # For each changed file, try to find related regressions
+                changed_file_paths = [f.get('file', '').lower() for f in changed_files]
+                
+                # Identify potentially affected tests
+                related_regressions = []
+                for regression in all_regressions:
+                    regression_feature = regression.get('feature', '').lower()
+                    for changed_file in changed_file_paths:
+                        if regression_feature and regression_feature in changed_file or changed_file in regression_feature:
+                            if regression not in related_regressions:
+                                related_regressions.append(regression)
+                            break
+                
+                # Display impact metrics in a row
+                col1, col2, col3, col4 = st.columns(4)
+                
+                with col1:
+                    st.metric("📁 Files Changed", total_files)
+                
+                with col2:
+                    st.metric("➕ Added", total_insertions, delta=f"+{total_insertions}")
+                
+                with col3:
+                    st.metric("➖ Deleted", total_deletions, delta=f"-{total_deletions}")
+                
+                with col4:
+                    st.metric("🧪 Related Tests", len(related_regressions))
+                
+                # Show compact view of related failures
+                if related_regressions:
+                    with st.expander("🔴 View Related Test Failures", expanded=False):
+                        for i, regression in enumerate(related_regressions[:3]):
+                            analysis = regression.get('analysis', {})
+                            explanation = analysis.get('detailed_explanation', '')
+                            summary_line = explanation.split('\n')[0] if explanation else "Test failure"
+                            if len(summary_line) > 100:
+                                summary_line = summary_line[:100] + "..."
+                            
+                            st.markdown(f"""
+                            <div class="summary-box">
+                                <div class="summary-text">❌ {regression['scenario_name']}</div>
+                                <div style="color: #888; font-size: 12px;">Feature: {regression.get('feature', 'N/A')}</div>
+                            </div>
+                            """, unsafe_allow_html=True)
+                        
+                        if len(related_regressions) > 3:
+                            st.caption(f"and {len(related_regressions) - 3} more failures")
+                
+                st.divider()
+                
+                # Always show section header
+                st.markdown("### 🔍 Detailed Code Changes — Line by Line")
+                
+                if diffs:
+                    diffs_with_content = [d for d in diffs if d.get('diff')]
+                    
+                    if diffs_with_content:
+                        # Show each file as expandable/collapsible section
+                        for idx, diff_item in enumerate(diffs_with_content):
+                            file_path = diff_item.get('new_path') or diff_item.get('old_path') or 'unknown'
+                            change_type = (diff_item.get('change_type') or 'modified').upper()
+                            
+                            # Get stats for this file
+                            file_stats = next(
+                                (f for f in changed_files if f['file'] == file_path),
+                                {'insertions': 0, 'deletions': 0}
+                            )
+                            
+                            insertions = file_stats.get('insertions', 0)
+                            deletions = file_stats.get('deletions', 0)
+                            
+                            # Display file as expandable with badge
+                            expander_label = f"📄 {file_path} — {change_type} (+{insertions} -{deletions})"
+                            
+                            with st.expander(expander_label, expanded=False):
+                                # Display GitHub-style diff
+                                diff_text = diff_item.get('diff', '')
+                                if diff_text:
+                                    # Parse and display diff with enhanced GitHub styling
+                                    diff_lines = diff_text.split('\n')
+                                    
+                                    html_diff = '<div style="background-color: #0d1117; border: 1px solid #30363d; border-radius: 6px; overflow-x: auto; padding: 0; margin: 8px 0;">'
+                                    line_num_old = 0
+                                    line_num_new = 0
+                                    
+                                    for line in diff_lines:
+                                        # Escape HTML special characters
+                                        line_escaped = line.replace('&', '&amp;').replace('<', '&lt;').replace('>', '&gt;')
+                                        
+                                        if line.startswith('@@'):
+                                            # Hunk header - location info
+                                            html_diff += f'<div style="background-color: #1c2128; color: #58a6ff; padding: 6px 12px; font-family: \'Consolas\', \'Courier New\', monospace; font-size: 12px; border-top: 1px solid #30363d; font-weight: 600;">{line_escaped}</div>'
+                                        elif line.startswith('+') and not line.startswith('+++'):
+                                            # Added line - GREEN
+                                            content = line_escaped[1:]  # Remove the + from line content
+                                            html_diff += f'<div style="background-color: #1a3626; padding: 4px 8px; font-family: \'Consolas\', \'Courier New\', monospace; font-size: 13px; line-height: 1.5;"><span style="color: #4ade80; font-weight: bold; margin-right: 12px;">+</span><span style="color: #aff5b4;">{content}</span></div>'
+                                            line_num_new += 1
+                                        elif line.startswith('-') and not line.startswith('---'):
+                                            # Removed line - RED
+                                            content = line_escaped[1:]  # Remove the - from line content
+                                            html_diff += f'<div style="background-color: #3b1819; padding: 4px 8px; font-family: \'Consolas\', \'Courier New\', monospace; font-size: 13px; line-height: 1.5;"><span style="color: #f85149; font-weight: bold; margin-right: 12px;">-</span><span style="color: #ffdcd7;">{content}</span></div>'
+                                            line_num_old += 1
+                                        elif line.startswith(' '):
+                                            # Context line - unchanged
+                                            content = line_escaped[1:]
+                                            html_diff += f'<div style="background-color: #0d1117; padding: 4px 8px; font-family: \'Consolas\', \'Courier New\', monospace; font-size: 13px; line-height: 1.5;"><span style="color: #484f58; margin-right: 12px;"> </span><span style="color: #c9d1d9;">{content}</span></div>'
+                                            line_num_old += 1
+                                            line_num_new += 1
+                                        elif line.startswith('---') or line.startswith('+++'):
+                                            # File header
+                                            html_diff += f'<div style="background-color: #161b22; color: #8b949e; padding: 6px 12px; font-family: \'Consolas\', \'Courier New\', monospace; font-size: 12px; font-weight: 600;">{line_escaped}</div>'
+                                        elif line.strip():
+                                            # Other content
+                                            html_diff += f'<div style="background-color: #0d1117; color: #8b949e; padding: 4px 8px; font-family: \'Consolas\', \'Courier New\', monospace; font-size: 13px;">{line_escaped}</div>'
+                                    
+                                    html_diff += '</div>'
+                                    st.markdown(html_diff, unsafe_allow_html=True)
+                                else:
+                                    st.markdown(f"""
+                                    <div class="dark-code-container">
+                                        <div style="color: #8b949e;">No diff content available</div>
+                                    </div>
+                                    """, unsafe_allow_html=True)
+                    else:
+                        st.markdown("""
+                        <div class="dark-code-container">
+                            <div style="color: #f59e0b;">⚠️ No detailed diffs available for this commit</div>
+                            <div style="color: #8b949e; margin-top: 8px; font-size: 14px;">
+                                File changes are recorded above, but line-by-line diffs were not captured during analysis.
+                            </div>
+                        </div>
+                        """, unsafe_allow_html=True)
+                else:
+                    st.markdown("""
+                    <div class="dark-code-container">
+                        <div style="color: #f59e0b;">⚠️ No diff data available for this commit</div>
+                        <div style="color: #8b949e; margin-top: 8px; font-size: 14px;">
+                            This may happen if the commit analysis didn't include detailed diffs. Try re-running the analysis or selecting a different commit.
+                        </div>
+                    </div>
+                    """, unsafe_allow_html=True)
+        else:
+            st.info("No commits with file changes available")
+    else:
+        st.info("Run analysis first to see code changes")
+
+with tab4:
     st.header("� Commit-by-Commit Inference")
     st.markdown(
         "Select a commit range and get an AI-powered summary of "
@@ -1443,9 +1781,9 @@ with tab3:
 
                 # Show changed file list
                 if pair["changed_files"]:
-                    with st.popover("📂 Changed files"):
-                        for f in pair["changed_files"]:
-                            st.markdown(f"- `{f}`")
+                    st.markdown("**📂 Changed files:**")
+                    for f in pair["changed_files"]:
+                        st.markdown(f"- `{f}`")
 
                 st.markdown("---")
                 st.markdown(inference_text)
@@ -1453,7 +1791,7 @@ with tab3:
         if not run_inference if 'run_inference' in dir() else True:
             st.info("Select a commit range above and click **⚡ Run Inference** to begin.")
 
-with tab4:
+with tab5:
     st.header("�📊 Test Reports")
     
     if ready_status and baseline_content and current_content:
@@ -1518,334 +1856,174 @@ with tab4:
             st.warning("No reports found in dataset. Place JSON reports in html-reports/ folder")
 
 
-with tab4:
-
-    st.header("Code Changes — Detailed Line by Line")
-    st.markdown("All commit changes with specific file modifications and line-by-line code diffs")
+with tab6:
+     st.header("📜 History")
     
-    if 'commits' in st.session_state and st.session_state.commits:
-        commits = st.session_state.commits
-        
-        # Calculate and display impact summary
-        impact = calculate_commit_impact(commits)
-        
-        # Impact summary card
-        st.markdown(f"""
-        <div class="changes-summary-card">
-            <div class="changes-summary-title">📊 Overall Commit Impact</div>
-            <div style="display: grid; grid-template-columns: repeat(5, 1fr); gap: 16px;">
-                <div style="text-align: center;">
-                    <div style="font-size: 24px; font-weight: 600; color: #c9d1d9;">📦 {impact['total_commits']}</div>
-                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Total Commits</div>
-                </div>
-                <div style="text-align: center;">
-                    <div style="font-size: 24px; font-weight: 600; color: #7ee787;">+ {impact['total_insertions']}</div>
-                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Lines Added</div>
-                </div>
-                <div style="text-align: center;">
-                    <div style="font-size: 24px; font-weight: 600; color: #f85149;">- {impact['total_deletions']}</div>
-                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Lines Deleted</div>
-                </div>
-                <div style="text-align: center;">
-                    <div style="font-size: 24px; font-weight: 600; color: #79c0ff;">📄 {len(impact['files_changed'])}</div>
-                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Files Modified</div>
-                </div>
-                <div style="text-align: center;">
-                    <div style="font-size: 24px; font-weight: 600; color: #d29922;">👤 {len(impact['authors'])}</div>
-                    <div style="font-size: 12px; color: #8b949e; margin-top: 4px;">Contributors</div>
-                </div>
-            </div>
-        </div>
-        """, unsafe_allow_html=True)
-        
-        st.divider()
-        
-        # Select commit to view
-        st.subheader("💻 Select Commit to View Changes")
-        
-        commits_with_changes = [c for c in commits if c.get('changed_files') and len(c.get('changed_files', [])) > 0]
-        
-        if commits_with_changes:
-            selected_commit_idx = st.selectbox(
-                "Choose a commit",
-                range(len(commits_with_changes)),
-                format_func=lambda i: f"{commits_with_changes[i]['sha'][:8]} — {commits_with_changes[i]['message'].split(chr(10))[0][:70]}"
-            )
-            
-            selected_commit = commits_with_changes[selected_commit_idx]
-            
-            # Commit metadata
-            st.markdown(f"""
-            <div class="dark-code-container" style="margin-bottom: 16px;">
-                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px;">
-                    <div>
-                        <div style="color: #8b949e; font-size: 12px;">COMMIT SHA</div>
-                        <div style="color: #79c0ff; font-family: monospace; margin-top: 4px;">{selected_commit['sha']}</div>
-                    </div>
-                    <div>
-                        <div style="color: #8b949e; font-size: 12px;">AUTHOR</div>
-                        <div style="color: #c9d1d9; margin-top: 4px;">{selected_commit['author']['name']}</div>
-                    </div>
-                    <div style="grid-column: 1 / -1;">
-                        <div style="color: #8b949e; font-size: 12px;">DATE</div>
-                        <div style="color: #c9d1d9; margin-top: 4px;">{selected_commit['date']}</div>
-                    </div>
-                </div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Commit message
-            st.markdown(f"""
-            <div class="dark-code-container" style="margin-bottom: 16px; border-left: 3px solid #79c0ff;">
-                <div style="color: #79c0ff; font-weight: 600; margin-bottom: 8px;">COMMIT MESSAGE</div>
-                <div style="color: #c9d1d9; white-space: pre-wrap; font-family: monospace;">{selected_commit['message']}</div>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            # Get changed files for this commit
-            changed_files = selected_commit.get('changed_files', [])
-            
-            # ============ SHOW WHAT IMPACT THOSE CHANGES HAVE MADE ============
-            st.markdown("### 📈 Show what impact those changes have made in the commit")
-            
-            # Get commit stats
-            commit_stats = selected_commit.get('stats', {})
-            total_files = commit_stats.get('total_files', len(changed_files))
-            total_insertions = commit_stats.get('total_insertions', 0)
-            total_deletions = commit_stats.get('total_deletions', 0)
-            
-            # Calculate potential impact on tests
-            report = st.session_state.get('report', {})
-            all_regressions = report.get('regressions', [])
-            
-            # For each changed file, try to find related regressions
-            changed_file_paths = [f.get('file', '').lower() for f in changed_files]
-            
-            # Identify potentially affected tests (heuristic: test/feature files match)
-            related_regressions = []
-            for regression in all_regressions:
-                regression_feature = regression.get('feature', '').lower()
-                # Check if any changed file might be related to this test
-                for changed_file in changed_file_paths:
-                    # Match feature names or common patterns
-                    if regression_feature and regression_feature in changed_file or changed_file in regression_feature:
-                        if regression not in related_regressions:
-                            related_regressions.append(regression)
-                        break
-            
-            # Display impact metrics
-            col1, col2, col3, col4 = st.columns(4)
-            
-            with col1:
-                st.metric(
-                    "📁 Files Changed",
-                    total_files,
-                    delta=None
-                )
-            
-            with col2:
-                st.metric(
-                    "➕ Lines Added",
-                    total_insertions,
-                    delta=f"+{total_insertions}"
-                )
-            
-            with col3:
-                st.metric(
-                    "➖ Lines Deleted",
-                    total_deletions,
-                    delta=f"-{total_deletions}"
-                )
-            
-            with col4:
-                st.metric(
-                    "🧪 Related Tests",
-                    len(related_regressions),
-                    delta=f"{len(related_regressions)} affected" if related_regressions else "No direct match"
-                )
-            
-            # Show related failing tests if any
-            if related_regressions:
-                st.divider()
-                st.markdown("#### 🔴 Related Test Failures")
-                
-                for i, regression in enumerate(related_regressions[:5]):  # Show top 5
-                    analysis = regression.get('analysis', {})
-                    explanation = analysis.get('detailed_explanation', '')
-                    summary_line = explanation.split('\n')[0] if explanation else "Test failure - see details"
-                    if len(summary_line) > 120:
-                        summary_line = summary_line[:120] + "..."
-                    
-                    st.markdown(f"""
-                    <div class="summary-box">
-                        <div class="summary-text">❌ {regression['scenario_name']}</div>
-                        <div style="color: #888; font-size: 12px; margin: 4px 0;">Feature: {regression.get('feature', 'N/A')}</div>
-                        <div style="color: #ccc; font-size: 13px;">{summary_line}</div>
-                    </div>
-                    """, unsafe_allow_html=True)
-                
-                if len(related_regressions) > 5:
-                    st.caption(f"and {len(related_regressions) - 5} more related failures...")
-            else:
-                st.divider()
-                st.info("💡 **No directly related test failures detected** — The changed files do not appear to be tested by current failures.")
-            
-            st.divider()
-            
-            # Files changed summary
-            if changed_files:
-                
-                # # Header with file count
-                # st.markdown(f"""
-                # <div style="background-color: #0d1117; padding: 16px; border-radius: 6px; margin-bottom: 16px;">
-                #     <div style="color: #c9d1d9; font-size: 18px; font-weight: 600;">
-                #         📁 Files Changed ({len(changed_files)} file{'s' if len(changed_files) != 1 else ''})
-                #     </div>
-                # </div>
-                # """, unsafe_allow_html=True)
-                
-                # # Files summary with badges - collapsible list
-                # with st.expander("📋 View Files Summary", expanded=True):
-                #     for file_change in changed_files:
-                #         file_path = file_change.get('file', '')
-                #         insertions = file_change.get('insertions', 0)
-                #         deletions = file_change.get('deletions', 0)
-                        
-                #         st.markdown(f"""
-                #         <div class="dark-file-summary">
-                #             <span class="dark-file-name">{file_path}</span>
-                #             <div>
-                #                 <span class="dark-badge dark-badge-add">+ {insertions}</span>
-                #                 <span class="dark-badge dark-badge-del">- {deletions}</span>
-                #             </div>
-                #         </div>
-                #         """, unsafe_allow_html=True)
-                
-                # st.divider()
-                
-                # Show all diffs for this commit
-                diffs = selected_commit.get('diffs', [])
-                
-                # Always show section header
-                st.markdown("### 🔍 Detailed Code Changes — Line by Line")
-                
-                if diffs:
-                    diffs_with_content = [d for d in diffs if d.get('diff')]
-                    
-                    if diffs_with_content:
-                        # Show each file as expandable/collapsible section
-                        for idx, diff_item in enumerate(diffs_with_content):
-                            file_path = diff_item.get('new_path') or diff_item.get('old_path') or 'unknown'
-                            change_type = (diff_item.get('change_type') or 'modified').upper()
-                            
-                            # Get stats for this file
-                            file_stats = next(
-                                (f for f in changed_files if f['file'] == file_path),
-                                {'insertions': 0, 'deletions': 0}
-                            )
-                            
-                            insertions = file_stats.get('insertions', 0)
-                            deletions = file_stats.get('deletions', 0)
-                            
-                            # Display file as expandable with badge
-                            expander_label = f"📄 {file_path} — {change_type} (+{insertions} -{deletions})"
-                            
-                            with st.expander(expander_label, expanded=False):
-                                # Display the dark-themed diff inside expander (without redundant header)
-                                diff_text = diff_item.get('diff', '')
-                                if diff_text:
-                                    display_dark_diff(
-                                        diff_text,
-                                        file_path,
-                                        insertions,
-                                        deletions,
-                                        show_header=False
-                                    )
-                                else:
-                                    st.markdown(f"""
-                                    <div class="dark-code-container">
-                                        <div style="color: #8b949e;">No diff content available</div>
-                                    </div>
-                                    """, unsafe_allow_html=True)
-                    else:
-                        st.markdown("""
-                        <div class="dark-code-container">
-                            <div style="color: #f59e0b;">⚠️ No detailed diffs available for this commit</div>
-                            <div style="color: #8b949e; margin-top: 8px; font-size: 14px;">
-                                File changes are recorded above, but line-by-line diffs were not captured during analysis.
-                            </div>
-                        </div>
-                        """, unsafe_allow_html=True)
-                else:
-                    st.markdown("""
-                    <div class="dark-code-container">
-                        <div style="color: #f59e0b;">⚠️ No diff data available for this commit</div>
-                        <div style="color: #8b949e; margin-top: 8px; font-size: 14px;">
-                            This may happen if the commit analysis didn't include detailed diffs. Try re-running the analysis or selecting a different commit.
-                        </div>
-                    </div>
-                    """, unsafe_allow_html=True)
-        else:
-            st.info("No commits with file changes available")
-    else:
-        st.info("Run analysis first to see code changes")
+    # --- Folder-style History Tab ---
+     st.markdown("View all previous analysis results, commits, baseline tests, and current test reports. Each analysis is saved as a folder with expandable sections.")
 
-with tab5:
-    st.header("�📜 History")
-
-
-
-    
-    if 'report' in st.session_state:
+    # --- History logic: Save new analysis ---
+     history = st.session_state.get('history', [])
+    # If a new report exists and not already in history, append it
+     if 'report' in st.session_state and st.session_state.report:
         report = st.session_state.report
-        
-        st.subheader("📝 Code Changes")
-        for file_change in report["detailed_file_changes"][:10]:
-            with st.expander(f"📄 {file_change['file_path']}"):
-                st.caption(file_change['summary'])
-                
-                for line_change in file_change["line_changes"][:5]:
-                    if line_change['change_type'] == 'modified':
-                        col1, col2 = st.columns(2)
-                        with col1:
-                            st.markdown(f"**Line {line_change['line_number']} (Before)**")
-                            st.code(line_change.get('old_content', ''), language="text")
-                        with col2:
-                            st.markdown(f"**Line {line_change['line_number']} (After)**")
-                            st.code(line_change.get('new_content', ''), language="text")
-        
-        st.divider()
-        
-        st.subheader("📥 Export Report")
-        report_json = json.dumps(report, indent=2, default=str)
-        
-        col1, col2 = st.columns(2)
-        with col1:
-            st.download_button(
-                "📥 Download JSON",
-                data=report_json,
-                file_name=f"analysis_{st.session_state.analysis_timestamp.replace(' ', '_').replace(':', '-')}.json" if st.session_state.analysis_timestamp else "analysis.json",
-                mime="application/json",
-                use_container_width=True
-            )
-        
-        with col2:
-            # Fix for f-string backslash issue
-            findings_text = "\n".join(f"- {f}" for f in report.get("key_findings", []))
-            markdown_summary = f"""# QA Intelligence Report
+        # Build history entry from report and other session state
+        new_entry = {
+            'timestamp': st.session_state.analysis_timestamp or datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'title': 'Analysis',
+            'executive_summary': report.get('executive_summary', ''),
+            'test_run_summary': report.get('test_run_summary', ''),
+            'commits_analyzed': report.get('commits_analyzed', ''),
+            'key_findings': report.get('key_findings', []),
+            'repo_name': st.session_state.get('dataset_name', ''),
+            'commit_range': f"{st.session_state.get('baseline_ref', '')} → {st.session_state.get('current_ref', '')}",
+            'commits': st.session_state.get('commits', []),
+            'test_reports_preview': [report.get('test_summary', {})],
+            'detailed_file_changes': report.get('detailed_file_changes', []),
+            # Save commit inference results if present
+            'commit_inference': st.session_state.get('inference_results', []),
+        }
+        # Only append if not already present (avoid duplicates)
+        if not history or new_entry['timestamp'] != history[-1].get('timestamp'):
+            history.append(new_entry)
+            st.session_state['history'] = history
+            # Save to file for persistence
+            history_file = Path("history.json")
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=2, default=str)
+
+    # Load history from file if session empty
+     if not history:
+        history_file = Path("history.json")
+        if history_file.exists():
+            with open(history_file, 'r', encoding='utf-8') as f:
+                history = json.load(f)
+            st.session_state['history'] = history
+
+     if history:
+        delete_index = None
+        for idx, entry in enumerate(history[::-1]):  # Show newest first
+            real_idx = len(history) - 1 - idx
+            col_exp, col_del = st.columns([12, 1])
+            with col_exp:
+                expander = st.expander(f"🗂️ {entry.get('timestamp', 'Unknown')} — {entry.get('title', 'Analysis')}", expanded=False)
+            with col_del:
+                if st.button("🗑️", key=f"delete_{entry.get('timestamp','')}", help="Delete this analysis"):
+                    delete_index = real_idx
+            with expander:
+                # Analysis Results
+                st.markdown("### 📋 Analysis Results")
+                st.markdown(f"**Generated:** {entry.get('timestamp', 'Unknown')}")
+                st.markdown(f"**Executive Summary:**")
+                st.markdown(entry.get('executive_summary', ''))
+                st.markdown(entry.get('test_run_summary', ''))
+                if entry.get('key_findings', []):
+                    for finding in entry.get('key_findings', []):
+                        st.markdown(f"- {finding}")
+                st.markdown("<hr style='border: none; border-top: 1px solid #444; margin: 8px 0;'>", unsafe_allow_html=True)
+
+                    # Commit Inference Results
+                if entry.get('commit_inference', []):
+                        st.markdown("### 🧠 Commit Inference Results")
+                        for idx, item in enumerate(entry['commit_inference']):
+                            pair, inference_text = item
+                            older = pair.get('older', {})
+                            newer = pair.get('newer', {})
+                            label = f"**{older.get('sha','')[:8]}** → **{newer.get('sha','')[:8]}**  ·  {newer.get('message','')[:70]}"
+                            with st.expander(label, expanded=(idx == 0)):
+                                st.markdown(inference_text)
+                        st.markdown("<hr style='border: none; border-top: 1px solid #444; margin: 8px 0;'>", unsafe_allow_html=True)
+                # Commit History
+                st.markdown("### 📦 Commit History")
+                st.markdown(f"**Repository:** {repo_url.split('/')[-1]} | **Commits:** {start_commit} to {end_commit} ({len(entry.get('commits', []))} total)")
+                st.markdown(f"**Commits:** {entry.get('commit_range', '')}")
+                for commit in entry.get('commits', []):
+                    sha = commit.get('sha', '')[:8]
+                    message = commit.get('message', '')
+                    author = commit.get('author', {}).get('name', '')
+                    date = commit.get('date', '')
+                    st.markdown(f"<div style='border-radius:6px;background:#23272f;padding:12px;margin-bottom:8px;'>", unsafe_allow_html=True)
+                    st.markdown(f"<b>{sha}</b> — {message[:80]}", unsafe_allow_html=True)
+                    st.markdown(f"<b>Author:</b> {author}", unsafe_allow_html=True)
+                    st.markdown(f"<b>Date:</b> {date}", unsafe_allow_html=True)
+                    st.markdown(f"<b>Message:</b> {message}", unsafe_allow_html=True)
+                    if 'changed_files' in commit and commit['changed_files']:
+                        st.markdown(f"<b>Files Changed:</b> {len(commit['changed_files'])}", unsafe_allow_html=True)
+                        for file in commit['changed_files'][:5]:
+                            st.markdown(f"<span style='background:#212d21;color:#4ade80;padding:4px 8px;border-radius:4px;margin-right:4px;'> {file['file']} </span>", unsafe_allow_html=True)
+                    st.markdown("</div>", unsafe_allow_html=True)
+                st.markdown("<hr style='border: none; border-top: 1px solid #444; margin: 8px 0;'>", unsafe_allow_html=True)
+
+                # Test Reports
+                st.markdown("### 📊 Test Reports")
+                st.markdown(f"#### Test Reports Preview")
+                for report_preview in entry.get('test_reports_preview', []):
+                    st.json(report_preview)
+                st.markdown("<hr style='border: none; border-top: 1px solid #444; margin: 8px 0;'>", unsafe_allow_html=True)
+
+                # Code Changes
+                st.markdown("### 📝 Code Changes")
+                for file_change in entry.get("detailed_file_changes", [])[:10]:
+                    st.markdown(f"#### 📄 {file_change['file_path']}")
+                    st.caption(file_change['summary'])
+                    for line_change in file_change.get("line_changes", [])[:5]:
+                        if line_change['change_type'] == 'modified':
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.markdown(f"<span style='color:#e74c3c;font-weight:bold;'>Line {line_change['line_number']} (Before)</span>", unsafe_allow_html=True)
+                                st.markdown(f"<pre style='background:#2c2c2c;color:#e74c3c;border-radius:4px;padding:8px;'>{line_change.get('old_content', '')}</pre>", unsafe_allow_html=True)
+                            with col2:
+                                st.markdown(f"<span style='color:#27ae60;font-weight:bold;'>Line {line_change['line_number']} (After)</span>", unsafe_allow_html=True)
+                                st.markdown(f"<pre style='background:#2c2c2c;color:#27ae60;border-radius:4px;padding:8px;'>{line_change.get('new_content', '')}</pre>", unsafe_allow_html=True)
+                st.markdown("<hr style='border: none; border-top: 1px solid #444; margin: 8px 0;'>", unsafe_allow_html=True)
+
+        if delete_index is not None:
+            del history[delete_index]
+            st.session_state['history'] = history
+            history_file = Path("history.json")
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=2, default=str)
+            st.experimental_rerun()
+
+        if delete_index is not None:
+            del history[delete_index]
+            st.session_state['history'] = history
+            history_file = Path("history.json")
+            with open(history_file, 'w', encoding='utf-8') as f:
+                json.dump(history, f, indent=2, default=str)
+            st.experimental_rerun()
+
+        # Export Report section (unchanged)
+        if 'report' in st.session_state:
+            report = st.session_state.report
+            st.subheader("📥 Export Report")
+            report_json = json.dumps(report, indent=2, default=str)
+            col1, col2 = st.columns(2)
+            with col1:
+                st.download_button(
+                    "📥 Download JSON",
+                    data=report_json,
+                    file_name=f"analysis_{st.session_state.analysis_timestamp.replace(' ', '_').replace(':', '-')}.json" if st.session_state.analysis_timestamp else "analysis.json",
+                    mime="application/json",
+                    use_container_width=True
+                )
+            with col2:
+                markdown_summary = f"""# QA Intelligence Report
 Generated: {st.session_state.analysis_timestamp}
 
 {report["executive_summary"]}
 
 ## Key Findings
-{findings_text}
+{chr(10).join(f"- {f}" for f in report.get("key_findings", []))}
 """
-            st.download_button(
-                "📄 Download Markdown",
-                data=markdown_summary,
-                file_name=f"summary_{st.session_state.analysis_timestamp.replace(' ', '_').replace(':', '-')}.md" if st.session_state.analysis_timestamp else "summary.md",
-                mime="text/markdown",
-                use_container_width=True
-            )
-    else:
-        st.info("Run analysis first to see history and export options")
+                st.download_button(
+                    "📄 Download Markdown",
+                    data=markdown_summary,
+                    file_name=f"summary_{st.session_state.analysis_timestamp.replace(' ', '_').replace(':', '-')}.md" if st.session_state.analysis_timestamp else "summary.md",
+                    mime="text/markdown",
+                    use_container_width=True
+                )
+        else:
+            st.info("Run analysis first to see history and export options")
+     else:
+        st.info("No history found. Run analysis to save results.")
